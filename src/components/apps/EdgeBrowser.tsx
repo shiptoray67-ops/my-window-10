@@ -244,6 +244,9 @@ export const EdgeBrowser: React.FC<{
         url,
         title: title || meta.siteName || meta.hostname,
         toolbarType: ToolBarType.NAVIGATION,
+        visibleTitle: true,
+        showReloadButton: true,
+        activeNativeNavigationForWebview: true,
         isPresentAfterPageLoad: false,
       });
     } catch {

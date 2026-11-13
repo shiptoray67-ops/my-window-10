@@ -87,7 +87,7 @@ define(['./workbox-afac4cd2'], (function (workbox) { 'use strict';
     "revision": "cb4250a9e15d7b8e0bb295dacf32b2c1"
   }, {
     "url": "index.html",
-    "revision": "4351a6186fbba35d9056058e4ec1c083"
+    "revision": "9dcdfadadb40be6e4010359b70b44313"
   }, {
     "url": "icon.svg",
     "revision": "a419d39011eb46dfd5b325b37f215121"
@@ -107,10 +107,10 @@ define(['./workbox-afac4cd2'], (function (workbox) { 'use strict';
     "url": "assets/win10_alpine_lockscreen_1794595377816-Cjde0xmk.jpg",
     "revision": null
   }, {
-    "url": "assets/web-ZIHZWuga.js",
+    "url": "assets/web-BD3AQWEi.js",
     "revision": null
   }, {
-    "url": "assets/web-Bvb4u5xw.js",
+    "url": "assets/web-35RUVAEA.js",
     "revision": null
   }, {
     "url": "assets/user_profile_avatar_1794595378912-Bomrg-9h.jpg",
@@ -122,7 +122,7 @@ define(['./workbox-afac4cd2'], (function (workbox) { 'use strict';
     "url": "assets/index-G78wGZhP.css",
     "revision": null
   }, {
-    "url": "assets/index-ClnOLfp7.js",
+    "url": "assets/index-C54nJ6tC.js",
     "revision": null
   }, {
     "url": "apple-touch-icon.png",

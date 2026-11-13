@@ -10,7 +10,7 @@
         "@capacitor/core": "^8.6.2",
         "@capacitor/screen-orientation": "^8.0.2",
         "@capacitor/status-bar": "^8.0.4",
-        "@capgo/inappbrowser": "^13.0.0",
+        "@capgo/inappbrowser": "^8.6.14",
         "@google/genai": "^2.4.0",
         "@tailwindcss/vite": "^4.3.3",
         "@vitejs/plugin-react": "^6.1.1",
@@ -231,7 +231,7 @@
 
     "@capacitor/status-bar": ["@capacitor/status-bar@8.0.4", "", { "peerDependencies": { "@capacitor/core": ">=8.0.0" } }, "sha512-ZMzBUyHBzwDUxcHadEhvOvmoPmMQGMZgaMRJu8ohELeI6IaxoVH9ZhdF/OHnY3/yykv3Glev8Tnbh4aZY/0B0w=="],
 
-    "@capgo/inappbrowser": ["@capgo/inappbrowser@13.0.0", "", { "peerDependencies": { "@capacitor/core": "^5.0.0" } }, "sha512-3T9loqHgMcPapjyrUay2t94iiVE+8mmSwWcELYY+AnOVOcJVfWeRzbQ/9+KzLjFmy4no4HfpvVMNsiDF6HYsMw=="],
+    "@capgo/inappbrowser": ["@capgo/inappbrowser@8.6.14", "", { "peerDependencies": { "@capacitor/core": ">=8.0.0" } }, "sha512-5aSpqDf94h6za78Sa2ZTlGIJpIhdV76ZPeuFSULTCDHswyGRGFjT5BKcs5WxiguUGD6dT+6tc04wlWU+yndNrA=="],
 
     "@emnapi/core": ["@emnapi/core@2.0.0-beta.2", "", { "dependencies": { "@emnapi/wasi-threads": "2.2.0", "tslib": "^2.4.0" } }, "sha512-MzCVoWtcg4Pm2B3je5mMvYMvj3MmBKw+fU7vbsJc9/iT8ip6/eYIHo/Dsm/mr+wsHB6SEyJDuxB09Yy6r/8+4A=="],
 
