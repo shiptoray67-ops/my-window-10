@@ -1,5 +1,9 @@
 apply plugin: 'com.android.application'
 
+def appVersionCode = project.hasProperty('versionCode') ? project.property('versionCode').toInteger() : 1
+def appVersionName = project.hasProperty('versionName') ? project.property('versionName').toString() : "1.0.${appVersionCode}"
+def persistentKeystore = rootProject.file('keystore/app.keystore')
+
 android {
     namespace = "com.win10.simulator"
     compileSdk = rootProject.ext.compileSdkVersion
@@ -7,8 +11,8 @@ android {
         applicationId "com.win10.simulator"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
-        versionName "1.0"
+        versionCode appVersionCode
+        versionName appVersionName
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
@@ -16,8 +20,24 @@ android {
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    signingConfigs {
+        win10 {
+            storeFile persistentKeystore
+            storePassword 'win10sim123'
+            keyAlias 'win10sim'
+            keyPassword 'win10sim123'
+        }
+    }
     buildTypes {
+        debug {
+            if (persistentKeystore.exists()) {
+                signingConfig signingConfigs.win10
+            }
+        }
         release {
+            if (persistentKeystore.exists()) {
+                signingConfig signingConfigs.win10
+            }
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }

@@ -1,7 +1,9 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Check,
   Clock,
+  Download,
+  ExternalLink,
   Globe,
   Laptop,
   Monitor,
@@ -15,10 +17,11 @@ import {
   User,
   Grid,
 } from 'lucide-react';
-import { Capacitor } from '@capacitor/core';
+import { Capacitor, PluginListenerHandle } from '@capacitor/core';
 import { useOS } from '../../context/OSContext';
 import { ACCENT_COLORS, BUILTIN_APPS, STORE_GAMES, WALLPAPER_PRESETS } from '../../data/apps';
-import { EmbeddedWebView } from '../../plugins/embeddedWebView';
+import { AppVersionInfo, EmbeddedWebView } from '../../plugins/embeddedWebView';
+import { getInstalledAppVersion, GITHUB_REPO } from '../../utils/appUpdater';
 import {
   DisplayOrientation,
   ResolutionScale,
@@ -48,6 +51,10 @@ export const SettingsApp: React.FC<{ win: WindowInstance }> = ({ win }) => {
     uninstallWebApp,
     resetAllSimulatorData,
     addNotification,
+    appUpdateInfo,
+    checkingAppUpdate,
+    appUpdateError,
+    runAppUpdateCheck,
   } = useOS();
 
   const initialTab = (win.launchPayload?.settingsTab as SettingsSection) || 'system';
@@ -56,12 +63,40 @@ export const SettingsApp: React.FC<{ win: WindowInstance }> = ({ win }) => {
   const [hintDraft, setHintDraft] = useState(settings.passwordHint);
   const [accountSavedMsg, setAccountSavedMsg] = useState('');
 
-  // Windows Update simulation
+  // Windows Update simulation & APK updater
   const [updateState, setUpdateState] = useState<'idle' | 'checking' | 'downloading' | 'uptodate'>('idle');
   const [updatePct, setUpdatePct] = useState(0);
   const [confirmReset, setConfirmReset] = useState(false);
   const [browserClearedMsg, setBrowserClearedMsg] = useState('');
   const [clearingBrowserData, setClearingBrowserData] = useState(false);
+
+  const [installedVersion, setInstalledVersion] = useState<AppVersionInfo>({
+    versionCode: 1,
+    versionName: '1.0.1',
+    packageName: 'com.win10.simulator',
+  });
+  const [apkUpdateStatus, setApkUpdateStatus] = useState<'idle' | 'downloading' | 'installing' | 'needs_permission' | 'error'>('idle');
+  const [apkUpdateProgress, setApkUpdateProgress] = useState(0);
+  const [apkUpdateMessage, setApkUpdateMessage] = useState('');
+
+  useEffect(() => {
+    void getInstalledAppVersion().then(setInstalledVersion);
+  }, []);
+
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform()) return;
+    let handle: PluginListenerHandle | null = null;
+    void EmbeddedWebView.addListener('updateStatus', (ev) => {
+      setApkUpdateStatus(ev.status);
+      setApkUpdateProgress(ev.progress || 0);
+      setApkUpdateMessage(ev.message || '');
+    }).then((h) => {
+      handle = h;
+    });
+    return () => {
+      void handle?.remove();
+    };
+  }, []);
 
   const wallpaperInputRef = useRef<HTMLInputElement>(null);
   const avatarInputRef = useRef<HTMLInputElement>(null);
@@ -817,8 +852,157 @@ export const SettingsApp: React.FC<{ win: WindowInstance }> = ({ win }) => {
 
         {section === 'update' && (
           <div className="max-w-lg space-y-6">
-            <h2 className="text-xl font-light">Windows Update &amp; Recovery</h2>
+            <h2 className="text-xl font-light">Update &amp; Security</h2>
 
+            {/* Real Android APK In-Place Updater (GitHub Releases) */}
+            <div className="p-5 border border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-[#222222] space-y-4">
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-start gap-3">
+                  <Download className="w-7 h-7 text-[#0078D7] shrink-0 mt-0.5" />
+                  <div>
+                    <div className="text-sm font-semibold">
+                      App Updates (In-Place APK)
+                    </div>
+                    <div className="text-[11px] text-neutral-500 mt-0.5">
+                      Installed: v{installedVersion.versionName} (Build {installedVersion.versionCode}) · {GITHUB_REPO}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {appUpdateError && (
+                <div className="p-2.5 text-xs bg-amber-500/10 border border-amber-500/30 text-amber-700 dark:text-amber-300">
+                  {appUpdateError}
+                </div>
+              )}
+
+              {appUpdateInfo && !appUpdateError && (
+                <div className="p-3 bg-white dark:bg-neutral-800/80 border border-neutral-200 dark:border-neutral-700 text-xs space-y-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-semibold">
+                      {appUpdateInfo.hasUpdate
+                        ? `New update ready: v${appUpdateInfo.latestVersionName} (Build ${appUpdateInfo.latestVersionCode})`
+                        : `You're on the latest build (Build ${installedVersion.versionCode})`}
+                    </span>
+                    <span className="text-[10px] text-neutral-500">
+                      Latest on GitHub: Build {appUpdateInfo.latestVersionCode || '?'}
+                    </span>
+                  </div>
+                  {appUpdateInfo.releaseNotes && (
+                    <p className="text-[11px] text-neutral-500 whitespace-pre-line">
+                      {appUpdateInfo.releaseNotes}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {(apkUpdateStatus === 'downloading' || apkUpdateStatus === 'installing') && (
+                <div className="space-y-1">
+                  <div className="flex justify-between text-xs tabular-nums">
+                    <span>{apkUpdateMessage || 'Downloading update...'}</span>
+                    <span>{apkUpdateProgress}%</span>
+                  </div>
+                  <div className="h-1.5 bg-neutral-300 dark:bg-neutral-700">
+                    <div
+                      style={{ width: `${apkUpdateProgress}%` }}
+                      className="h-full bg-[#0078D7] transition-all"
+                    />
+                  </div>
+                </div>
+              )}
+
+              {apkUpdateStatus === 'needs_permission' && (
+                <div className="p-3 text-xs bg-amber-500/10 border border-amber-500/30 text-amber-800 dark:text-amber-200 space-y-2">
+                  <div>{apkUpdateMessage}</div>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      onClick={() => void EmbeddedWebView.openInstallPermissionSettings()}
+                      className="px-3 py-1.5 bg-amber-600 text-white hover:bg-amber-700 cursor-pointer"
+                    >
+                      Open Install Permission Settings
+                    </button>
+                    <button
+                      onClick={async () => {
+                        const res = await EmbeddedWebView.installPendingUpdate();
+                        if (res.launched) {
+                          setApkUpdateStatus('installing');
+                          setApkUpdateMessage('Opening Android installer...');
+                        }
+                      }}
+                      className="px-3 py-1.5 bg-[#0078D7] text-white hover:bg-[#106EBE] cursor-pointer"
+                    >
+                      Install Downloaded APK
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {apkUpdateStatus === 'error' && apkUpdateMessage && (
+                <div className="p-2.5 text-xs bg-rose-500/10 border border-rose-500/30 text-rose-700 dark:text-rose-300">
+                  {apkUpdateMessage}
+                </div>
+              )}
+
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  onClick={() => void runAppUpdateCheck(false)}
+                  disabled={checkingAppUpdate || apkUpdateStatus === 'downloading'}
+                  className="px-4 py-2 bg-[#0078D7] hover:bg-[#106EBE] disabled:opacity-50 text-white text-xs font-medium cursor-pointer"
+                >
+                  {checkingAppUpdate ? 'Checking GitHub...' : 'Check for updates'}
+                </button>
+
+                {appUpdateInfo?.hasUpdate && appUpdateInfo.downloadUrl && (
+                  <button
+                    disabled={apkUpdateStatus === 'downloading'}
+                    onClick={async () => {
+                      if (!appUpdateInfo.downloadUrl) return;
+                      if (Capacitor.isNativePlatform()) {
+                        setApkUpdateStatus('downloading');
+                        setApkUpdateProgress(0);
+                        setApkUpdateMessage('Starting download...');
+                        try {
+                          await EmbeddedWebView.downloadAndInstallUpdate({
+                            url: appUpdateInfo.downloadUrl,
+                            filename: `Win10Simulator-b${appUpdateInfo.latestVersionCode}.apk`,
+                          });
+                        } catch (err) {
+                          setApkUpdateStatus('error');
+                          setApkUpdateMessage(
+                            err instanceof Error ? err.message : 'Failed to start APK download.'
+                          );
+                        }
+                      } else {
+                        const a = document.createElement('a');
+                        a.href = appUpdateInfo.downloadUrl;
+                        a.download = 'Win10Simulator.apk';
+                        a.target = '_blank';
+                        a.rel = 'noopener noreferrer';
+                        a.click();
+                      }
+                    }}
+                    className="flex items-center gap-1.5 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-medium cursor-pointer"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    Download and install update
+                  </button>
+                )}
+
+                {appUpdateInfo?.releaseUrl && (
+                  <a
+                    href={appUpdateInfo.releaseUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 px-3 py-2 border border-neutral-300 dark:border-neutral-700 hover:bg-black/5 dark:hover:bg-white/10 text-xs"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    Release page
+                  </a>
+                )}
+              </div>
+            </div>
+
+            {/* Simulated Windows OS Cumulative Update */}
             <div className="p-5 border border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-[#222222] space-y-4">
               <div className="flex items-start gap-3">
                 <ShieldCheck className="w-8 h-8 text-[#0078D7] shrink-0" />
@@ -827,10 +1011,10 @@ export const SettingsApp: React.FC<{ win: WindowInstance }> = ({ win }) => {
                     {updateState === 'uptodate'
                       ? "You're up to date"
                       : updateState === 'checking'
-                      ? 'Checking for updates...'
+                      ? 'Checking for Windows updates...'
                       : updateState === 'downloading'
                       ? 'Installing KB5041580 Cumulative Update...'
-                      : 'Windows Update'}
+                      : 'Windows Update (Simulator)'}
                   </div>
                   <div className="text-xs text-neutral-500 mt-0.5">
                     Last checked: {new Date(settings.lastUpdateCheck).toLocaleString()}
@@ -856,9 +1040,9 @@ export const SettingsApp: React.FC<{ win: WindowInstance }> = ({ win }) => {
               <button
                 onClick={runWindowsUpdate}
                 disabled={updateState === 'checking' || updateState === 'downloading'}
-                className="px-4 py-2 bg-[#0078D7] hover:bg-[#106EBE] disabled:opacity-50 text-white text-xs font-medium cursor-pointer"
+                className="px-4 py-2 border border-neutral-300 dark:border-neutral-700 hover:bg-black/5 dark:hover:bg-white/10 disabled:opacity-50 text-xs font-medium cursor-pointer"
               >
-                Check for updates
+                Check for Windows OS updates
               </button>
             </div>
 

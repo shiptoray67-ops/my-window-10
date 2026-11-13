@@ -1,12 +1,43 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Capacitor } from '@capacitor/core';
 import { GripHorizontal, Minus, Plus, X } from 'lucide-react';
 import { useOS } from '../../context/OSContext';
+import { EmbeddedWebView, NativeCursorType } from '../../plugins/embeddedWebView';
 
 const INTERACTIVE_SELECTOR =
   'button, a, [role="button"], input, select, textarea, [data-desktop-icon="true"], [data-interactive="true"], [draggable="true"]';
 
+const TEXT_INPUT_SELECTOR =
+  'input[type="text"], input[type="search"], input[type="url"], input[type="email"], input[type="password"], input:not([type]), textarea, [contenteditable="true"]';
+
+function detectCursorType(rawEl: Element, interactiveEl: Element | null): NativeCursorType {
+  const resizeEl = rawEl.closest('[data-resize-dir]');
+  const resizeDir = resizeEl?.getAttribute('data-resize-dir');
+  if (resizeDir === 'n' || resizeDir === 's') return 'resize-ns';
+  if (resizeDir === 'e' || resizeDir === 'w') return 'resize-ew';
+  if (resizeDir === 'nw' || resizeDir === 'se') return 'resize-nwse';
+  if (resizeDir === 'ne' || resizeDir === 'sw') return 'resize-nesw';
+
+  try {
+    const computed = window.getComputedStyle(rawEl).cursor;
+    if (computed === 'ns-resize' || computed === 'n-resize' || computed === 's-resize') return 'resize-ns';
+    if (computed === 'ew-resize' || computed === 'e-resize' || computed === 'w-resize') return 'resize-ew';
+    if (computed === 'nwse-resize' || computed === 'nw-resize' || computed === 'se-resize') return 'resize-nwse';
+    if (computed === 'nesw-resize' || computed === 'ne-resize' || computed === 'sw-resize') return 'resize-nesw';
+    if (computed === 'text') return 'text';
+    if (computed === 'pointer') return 'hand';
+  } catch {
+    // ignore
+  }
+
+  if (rawEl.closest(TEXT_INPUT_SELECTOR)) return 'text';
+  if (interactiveEl) return 'hand';
+  return 'arrow';
+}
+
 export const VirtualMouseOverlay: React.FC = () => {
   const { settings, updateSettings, powerPhase } = useOS();
+  const isNative = Capacitor.isNativePlatform();
   const isActive = powerPhase === 'desktop' && settings.mouseMode;
   const showPanel = Boolean(settings.showTouchpadPanel);
   const sensitivity = settings.touchpadSensitivity || 1.0;
@@ -17,10 +48,14 @@ export const VirtualMouseOverlay: React.FC = () => {
   });
 
   const [cursorPos, setCursorPos] = useState<{ x: number; y: number }>(initialPos);
+  const [cursorStyle, setCursorStyle] = useState<NativeCursorType>('arrow');
   const cursorPosRef = useRef(cursorPos);
   const targetPosRef = useRef(cursorPos);
   const rafIdRef = useRef<number | null>(null);
   const activeDragButtonsRef = useRef(0);
+  const lastCursorStyleRef = useRef<NativeCursorType>('arrow');
+  const dragTargetWebViewIdRef = useRef<string | null>(null);
+  const lastHoverSentRef = useRef(0);
 
   const [panelPos, setPanelPos] = useState<{ x: number; y: number }>(() => {
     const vw = typeof window !== 'undefined' ? window.innerWidth : 1024;
@@ -50,7 +85,7 @@ export const VirtualMouseOverlay: React.FC = () => {
     }
   }, []);
 
-  // Sync document class and center cursor whenever Mouse Mode turns ON
+  // Sync native cursor visibility & touch interceptor cleanly
   useEffect(() => {
     document.documentElement.classList.toggle('vm-cursor-active', isActive);
     if (isActive && typeof window !== 'undefined') {
@@ -69,7 +104,21 @@ export const VirtualMouseOverlay: React.FC = () => {
         x: Math.max(8, Math.min(vw - pw - 8, prev.x)),
         y: Math.max(8, Math.min(vh - ph - 54, prev.y)),
       }));
+
+      if (isNative) {
+        void EmbeddedWebView.setMouseModeTouchIntercept({ enabled: true }).catch(() => {});
+        void EmbeddedWebView.showCursor({
+          x: next.x,
+          y: next.y,
+          devicePixelRatio: window.devicePixelRatio || 1,
+          type: lastCursorStyleRef.current,
+        }).catch(() => {});
+      }
+    } else if (isNative) {
+      void EmbeddedWebView.setMouseModeTouchIntercept({ enabled: false }).catch(() => {});
+      void EmbeddedWebView.hideCursor().catch(() => {});
     }
+
     return () => {
       stopRaf();
       document.documentElement.classList.remove('vm-cursor-active');
@@ -82,8 +131,12 @@ export const VirtualMouseOverlay: React.FC = () => {
         clearTimeout(tooltipTimerRef.current);
         tooltipTimerRef.current = null;
       }
+      if (isNative) {
+        void EmbeddedWebView.setMouseModeTouchIntercept({ enabled: false }).catch(() => {});
+        void EmbeddedWebView.hideCursor().catch(() => {});
+      }
     };
-  }, [isActive, stopRaf]);
+  }, [isActive, isNative, stopRaf]);
 
   // Clamp cursor and optional panel on viewport resize
   useEffect(() => {
@@ -98,6 +151,13 @@ export const VirtualMouseOverlay: React.FC = () => {
       targetPosRef.current = clamped;
       cursorPosRef.current = clamped;
       setCursorPos(clamped);
+      if (isNative) {
+        void EmbeddedWebView.moveCursor({
+          x: clamped.x,
+          y: clamped.y,
+          devicePixelRatio: window.devicePixelRatio || 1,
+        }).catch(() => {});
+      }
 
       const pw = Math.min(340, vw - 16);
       setPanelPos((prev) => ({
@@ -107,7 +167,7 @@ export const VirtualMouseOverlay: React.FC = () => {
     };
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
-  }, [isActive]);
+  }, [isActive, isNative]);
 
   const getHitElements = useCallback((x: number, y: number) => {
     const stack = document.elementsFromPoint(x, y);
@@ -117,18 +177,34 @@ export const VirtualMouseOverlay: React.FC = () => {
     const titledEl = rawEl.closest('[title], [aria-label]');
     const tooltipText =
       titledEl?.getAttribute('title') || titledEl?.getAttribute('aria-label') || '';
-    return { rawEl, interactiveEl, tooltipText };
+
+    const nativeWebViewId =
+      rawEl.getAttribute('data-native-webview-active') === 'true'
+        ? rawEl.getAttribute('data-embedded-webview-placeholder')
+        : null;
+
+    return { rawEl, interactiveEl, tooltipText, nativeWebViewId };
   }, []);
 
   const syncHoverAt = useCallback(
     (x: number, y: number, activeButtons = 0) => {
-      const { rawEl, interactiveEl, tooltipText } = getHitElements(x, y);
+      const { rawEl, interactiveEl, tooltipText, nativeWebViewId } = getHitElements(x, y);
       const prevRaw = hoveredRawRef.current;
       const prevInt = hoveredInteractiveRef.current;
 
+      const nextStyle = detectCursorType(rawEl, interactiveEl);
+      if (nextStyle !== lastCursorStyleRef.current) {
+        lastCursorStyleRef.current = nextStyle;
+        if (!isNative) {
+          setCursorStyle(nextStyle);
+        } else {
+          void EmbeddedWebView.setCursorStyle({ type: nextStyle }).catch(() => {});
+        }
+      }
+
       if (prevInt !== interactiveEl) {
         if (prevInt) prevInt.removeAttribute('data-vm-hover');
-        if (interactiveEl) interactiveEl.setAttribute('data-vm-hover', 'true');
+        if (interactiveEl && !nativeWebViewId) interactiveEl.setAttribute('data-vm-hover', 'true');
         hoveredInteractiveRef.current = interactiveEl;
       }
 
@@ -183,13 +259,39 @@ export const VirtualMouseOverlay: React.FC = () => {
           tooltipTimerRef.current = null;
         }
         setTooltip(null);
-        if (tooltipText) {
+        if (tooltipText && !nativeWebViewId) {
           tooltipTimerRef.current = window.setTimeout(() => {
             setTooltip({ text: tooltipText, x, y });
           }, 280);
         }
       } else {
         setTooltip((t) => (t ? { ...t, x, y } : null));
+      }
+
+      // Forward drag move directly to native WebView if drag started inside WebView
+      if (isNative && activeButtons > 0 && dragTargetWebViewIdRef.current) {
+        void EmbeddedWebView.injectDrag({
+          id: dragTargetWebViewIdRef.current,
+          phase: 'move',
+          x,
+          y,
+          devicePixelRatio: window.devicePixelRatio || 1,
+        }).catch(() => {});
+        return;
+      }
+
+      // Forward hover move to native WebView so CSS :hover effects work on web pages
+      if (isNative && nativeWebViewId && activeButtons === 0) {
+        const now = performance.now();
+        if (now - lastHoverSentRef.current >= 32) {
+          lastHoverSentRef.current = now;
+          void EmbeddedWebView.injectHover({
+            id: nativeWebViewId,
+            x,
+            y,
+            devicePixelRatio: window.devicePixelRatio || 1,
+          }).catch(() => {});
+        }
       }
 
       rawEl.dispatchEvent(
@@ -215,7 +317,7 @@ export const VirtualMouseOverlay: React.FC = () => {
         );
       }
     },
-    [getHitElements]
+    [getHitElements, isNative]
   );
 
   // Smooth cursor glide via requestAnimationFrame
@@ -228,28 +330,49 @@ export const VirtualMouseOverlay: React.FC = () => {
 
     if (dist <= 0.35) {
       cursorPosRef.current = { x: tgt.x, y: tgt.y };
-      setCursorPos(cursorPosRef.current);
+      if (!isNative) setCursorPos(cursorPosRef.current);
+      if (isNative) {
+        void EmbeddedWebView.moveCursor({
+          x: tgt.x,
+          y: tgt.y,
+          devicePixelRatio: window.devicePixelRatio || 1,
+        }).catch(() => {});
+      }
       syncHoverAt(tgt.x, tgt.y, activeDragButtonsRef.current);
       rafIdRef.current = null;
       return;
     }
 
-    const smoothFactor = 0.48;
+    const smoothFactor = 0.5;
     const nx = cur.x + diffX * smoothFactor;
     const ny = cur.y + diffY * smoothFactor;
     cursorPosRef.current = { x: nx, y: ny };
-    setCursorPos(cursorPosRef.current);
+    if (!isNative) setCursorPos(cursorPosRef.current);
+    if (isNative) {
+      void EmbeddedWebView.moveCursor({
+        x: nx,
+        y: ny,
+        devicePixelRatio: window.devicePixelRatio || 1,
+      }).catch(() => {});
+    }
     syncHoverAt(nx, ny, activeDragButtonsRef.current);
     rafIdRef.current = requestAnimationFrame(stepCursorAnimation);
-  }, [syncHoverAt]);
+  }, [isNative, syncHoverAt]);
 
   const flushCursorToTarget = useCallback(() => {
     stopRaf();
     const tgt = targetPosRef.current;
     cursorPosRef.current = tgt;
-    setCursorPos(tgt);
+    if (!isNative) setCursorPos(tgt);
+    if (isNative) {
+      void EmbeddedWebView.moveCursor({
+        x: tgt.x,
+        y: tgt.y,
+        devicePixelRatio: window.devicePixelRatio || 1,
+      }).catch(() => {});
+    }
     return tgt;
-  }, [stopRaf]);
+  }, [isNative, stopRaf]);
 
   const moveCursorBy = useCallback(
     (dx: number, dy: number, activeButtons = 0) => {
@@ -269,16 +392,31 @@ export const VirtualMouseOverlay: React.FC = () => {
   );
 
   const triggerPulse = useCallback((kind: 'left' | 'right') => {
+    if (isNative) return;
     setClickPulse(kind);
     window.setTimeout(() => setClickPulse(null), 220);
-  }, []);
+  }, [isNative]);
 
   const dispatchMouseDown = useCallback(
     (button: 0 | 2, detail = 1) => {
       const { x, y } = flushCursorToTarget();
-      const { rawEl } = getHitElements(x, y);
+      const { rawEl, nativeWebViewId } = getHitElements(x, y);
       const buttons = button === 0 ? 1 : 2;
       activeDragButtonsRef.current = buttons;
+
+      if (isNative && nativeWebViewId && button === 0) {
+        dragTargetWebViewIdRef.current = nativeWebViewId;
+        void EmbeddedWebView.injectDrag({
+          id: nativeWebViewId,
+          phase: 'start',
+          x,
+          y,
+          devicePixelRatio: window.devicePixelRatio || 1,
+        }).catch(() => {});
+        return rawEl;
+      }
+
+      dragTargetWebViewIdRef.current = null;
       rawEl.dispatchEvent(
         new MouseEvent('mousedown', {
           bubbles: true,
@@ -293,13 +431,29 @@ export const VirtualMouseOverlay: React.FC = () => {
       );
       return rawEl;
     },
-    [flushCursorToTarget, getHitElements]
+    [flushCursorToTarget, getHitElements, isNative]
   );
 
   const dispatchLeftUpAndClick = useCallback(
     (emitClick: boolean, detail = 1) => {
       const { x, y } = flushCursorToTarget();
       activeDragButtonsRef.current = 0;
+
+      if (isNative && dragTargetWebViewIdRef.current) {
+        const targetId = dragTargetWebViewIdRef.current;
+        dragTargetWebViewIdRef.current = null;
+        void EmbeddedWebView.injectDrag({
+          id: targetId,
+          phase: 'end',
+          x,
+          y,
+          devicePixelRatio: window.devicePixelRatio || 1,
+        }).catch(() => {});
+        syncHoverAt(x, y, 0);
+        return;
+      }
+
+      dragTargetWebViewIdRef.current = null;
       const { rawEl } = getHitElements(x, y);
       const init: MouseEventInit = {
         bubbles: true,
@@ -328,21 +482,52 @@ export const VirtualMouseOverlay: React.FC = () => {
       triggerPulse('left');
       syncHoverAt(x, y, 0);
     },
-    [flushCursorToTarget, getHitElements, syncHoverAt, triggerPulse]
+    [flushCursorToTarget, getHitElements, isNative, syncHoverAt, triggerPulse]
   );
 
   const dispatchLeftClick = useCallback(
     (detail = 1) => {
+      const { x, y } = flushCursorToTarget();
+      const { nativeWebViewId } = getHitElements(x, y);
+      if (isNative && nativeWebViewId) {
+        if (detail >= 2) {
+          void EmbeddedWebView.injectDoubleTap({
+            id: nativeWebViewId,
+            x,
+            y,
+            devicePixelRatio: window.devicePixelRatio || 1,
+          }).catch(() => {});
+        } else {
+          void EmbeddedWebView.injectTap({
+            id: nativeWebViewId,
+            x,
+            y,
+            devicePixelRatio: window.devicePixelRatio || 1,
+          }).catch(() => {});
+        }
+        return;
+      }
       dispatchMouseDown(0, detail);
       dispatchLeftUpAndClick(true, detail);
     },
-    [dispatchLeftUpAndClick, dispatchMouseDown]
+    [dispatchLeftUpAndClick, dispatchMouseDown, flushCursorToTarget, getHitElements, isNative]
   );
 
   const dispatchRightClick = useCallback(() => {
     const { x, y } = flushCursorToTarget();
     activeDragButtonsRef.current = 0;
-    const { rawEl } = getHitElements(x, y);
+    const { rawEl, nativeWebViewId } = getHitElements(x, y);
+
+    if (isNative && nativeWebViewId) {
+      void EmbeddedWebView.injectLongPress({
+        id: nativeWebViewId,
+        x,
+        y,
+        devicePixelRatio: window.devicePixelRatio || 1,
+      }).catch(() => {});
+      return;
+    }
+
     const init: MouseEventInit = {
       bubbles: true,
       cancelable: true,
@@ -357,12 +542,25 @@ export const VirtualMouseOverlay: React.FC = () => {
     rawEl.dispatchEvent(new MouseEvent('contextmenu', init));
     triggerPulse('right');
     syncHoverAt(x, y, 0);
-  }, [flushCursorToTarget, getHitElements, syncHoverAt, triggerPulse]);
+  }, [flushCursorToTarget, getHitElements, isNative, syncHoverAt, triggerPulse]);
 
   const scrollAtCursor = useCallback(
     (dx: number, dy: number) => {
       const { x, y } = cursorPosRef.current;
-      const { rawEl } = getHitElements(x, y);
+      const { rawEl, nativeWebViewId } = getHitElements(x, y);
+
+      if (isNative && nativeWebViewId) {
+        void EmbeddedWebView.injectScroll({
+          id: nativeWebViewId,
+          dx: dx * sensitivity,
+          dy: dy * sensitivity,
+          x,
+          y,
+          devicePixelRatio: window.devicePixelRatio || 1,
+        }).catch(() => {});
+        return;
+      }
+
       let cur: HTMLElement | null = rawEl as HTMLElement;
       const scrollYDelta = -dy * sensitivity * 1.5;
       const scrollXDelta = -dx * sensitivity * 1.5;
@@ -393,7 +591,7 @@ export const VirtualMouseOverlay: React.FC = () => {
       );
       syncHoverAt(x, y, 0);
     },
-    [getHitElements, sensitivity, syncHoverAt]
+    [getHitElements, isNative, sensitivity, syncHoverAt]
   );
 
   // Gesture state refs shared by invisible full-screen touchpad or optional floating panel
@@ -403,6 +601,7 @@ export const VirtualMouseOverlay: React.FC = () => {
     startY: number;
     lastX: number;
     lastY: number;
+    lastDist: number;
     totalMove: number;
     startTime: number;
     longPressTimer: number | null;
@@ -429,7 +628,7 @@ export const VirtualMouseOverlay: React.FC = () => {
       .some((el) => Boolean(el.closest('[data-mouse-mode-toggle="true"]')));
   };
 
-  // Touchpad Touch Events (use targetTouches so holding optional Left Click button + sliding works cleanly)
+  // Touchpad Touch Events
   const handlePadTouchStart = (e: React.TouchEvent, checkDirectToggle: boolean) => {
     e.stopPropagation();
     lastTouchTimeRef.current = Date.now();
@@ -463,6 +662,7 @@ export const VirtualMouseOverlay: React.FC = () => {
         startY: t.clientY,
         lastX: t.clientX,
         lastY: t.clientY,
+        lastDist: 0,
         totalMove: 0,
         startTime: now,
         longPressTimer: timer,
@@ -476,12 +676,14 @@ export const VirtualMouseOverlay: React.FC = () => {
     } else if (touches.length >= 2) {
       const cx = (touches[0].clientX + touches[1].clientX) / 2;
       const cy = (touches[0].clientY + touches[1].clientY) / 2;
+      const dist = Math.hypot(touches[1].clientX - touches[0].clientX, touches[1].clientY - touches[0].clientY);
       gestureRef.current = {
         fingers: 2,
         startX: cx,
         startY: cy,
         lastX: cx,
         lastY: cy,
+        lastDist: dist,
         totalMove: 0,
         startTime: Date.now(),
         longPressTimer: null,
@@ -506,24 +708,51 @@ export const VirtualMouseOverlay: React.FC = () => {
       clearLongPress();
       const cx = (touches[0].clientX + touches[1].clientX) / 2;
       const cy = (touches[0].clientY + touches[1].clientY) / 2;
+      const dist = Math.hypot(touches[1].clientX - touches[0].clientX, touches[1].clientY - touches[0].clientY);
+
       if (g.fingers < 2) {
         g.fingers = 2;
         g.startX = cx;
         g.startY = cy;
         g.lastX = cx;
         g.lastY = cy;
+        g.lastDist = dist;
         g.totalMove = 0;
         return;
       }
+
       const dx = cx - g.lastX;
       const dy = cy - g.lastY;
-      g.totalMove += Math.hypot(dx, dy);
+      const distRatio = g.lastDist > 12 ? dist / g.lastDist : 1;
+      const isPinch = Math.abs(dist - g.lastDist) > 6 && Math.abs(distRatio - 1) > 0.04;
+
+      g.totalMove += Math.hypot(dx, dy) + Math.abs(dist - g.lastDist);
       g.lastX = cx;
       g.lastY = cy;
       if (g.totalMove > 6) {
         g.twoFingerMoved = true;
       }
-      scrollAtCursor(dx, dy);
+
+      if (isPinch && isNative) {
+        g.lastDist = dist;
+        const { x, y } = cursorPosRef.current;
+        const { nativeWebViewId } = getHitElements(x, y);
+        if (nativeWebViewId) {
+          void EmbeddedWebView.injectPinch({
+            id: nativeWebViewId,
+            scaleDelta: distRatio,
+            x,
+            y,
+            devicePixelRatio: window.devicePixelRatio || 1,
+          }).catch(() => {});
+        }
+        return;
+      }
+
+      if (!isPinch) {
+        g.lastDist = dist;
+        scrollAtCursor(dx, dy);
+      }
       return;
     }
 
@@ -768,7 +997,7 @@ export const VirtualMouseOverlay: React.FC = () => {
 
   return (
     <>
-      {/* Default Invisible Full-Screen Touchpad Layer (no panel covering desktop) */}
+      {/* Default Invisible Full-Screen Touchpad Layer */}
       {!showPanel && (
         <div
           data-virtual-mouse="true"
@@ -786,41 +1015,89 @@ export const VirtualMouseOverlay: React.FC = () => {
         />
       )}
 
-      {/* Virtual Windows Arrow Cursor */}
-      <div
-        data-virtual-mouse="true"
-        style={{
-          left: cursorPos.x,
-          top: cursorPos.y,
-        }}
-        className="pointer-events-none fixed z-[9997] select-none"
-      >
-        {(clickPulse || isDraggingMouse) && (
-          <div
-            style={{
-              borderColor:
-                clickPulse === 'right' ? '#f59e0b' : settings.accentColor,
-            }}
-            className="absolute -left-2.5 -top-2.5 w-6 h-6 rounded-full border-2 opacity-80 animate-ping"
-          />
-        )}
-        <svg
-          width="22"
-          height="26"
-          viewBox="0 0 22 26"
-          fill="none"
-          xmlns="http://www.w3.org/2000/svg"
-          className="-translate-x-[1.5px] -translate-y-[1.5px] drop-shadow-[0_2px_3px_rgba(0,0,0,0.55)]"
+      {/* Web Preview Only: DOM Cursor (hidden on native Android where always-on-top native cursor renders) */}
+      {!isNative && (
+        <div
+          data-virtual-mouse="true"
+          style={{
+            left: cursorPos.x,
+            top: cursorPos.y,
+          }}
+          className="pointer-events-none fixed z-[9997] select-none"
         >
-          <path
-            d="M1.5 1.5L1.5 21.2L6.6 16.4L10.2 24.1L13.1 22.8L9.5 15.1L16.5 15.1L1.5 1.5Z"
-            fill={isDraggingMouse ? '#E5F3FF' : '#FFFFFF'}
-            stroke="#111111"
-            strokeWidth="1.5"
-            strokeLinejoin="round"
-          />
-        </svg>
-      </div>
+          {(clickPulse || isDraggingMouse) && (
+            <div
+              style={{
+                borderColor:
+                  clickPulse === 'right' ? '#f59e0b' : settings.accentColor,
+              }}
+              className="absolute -left-2.5 -top-2.5 w-6 h-6 rounded-full border-2 opacity-80 animate-ping"
+            />
+          )}
+          {cursorStyle === 'arrow' || cursorStyle === 'hand' || cursorStyle === 'text' ? (
+            <svg
+              width="22"
+              height="26"
+              viewBox="0 0 22 26"
+              fill="none"
+              xmlns="http://www.w3.org/2000/svg"
+              className="-translate-x-[1.5px] -translate-y-[1.5px] drop-shadow-[0_2px_3px_rgba(0,0,0,0.55)]"
+            >
+              {cursorStyle === 'text' ? (
+                <path
+                  d="M7 3H15M11 3V21M7 21H15"
+                  stroke="#FFFFFF"
+                  strokeWidth="3.5"
+                  strokeLinecap="round"
+                />
+              ) : (
+                <path
+                  d="M1.5 1.5L1.5 21.2L6.6 16.4L10.2 24.1L13.1 22.8L9.5 15.1L16.5 15.1L1.5 1.5Z"
+                  fill={isDraggingMouse ? '#E5F3FF' : '#FFFFFF'}
+                  stroke="#111111"
+                  strokeWidth="1.5"
+                  strokeLinejoin="round"
+                />
+              )}
+              {cursorStyle === 'text' && (
+                <path
+                  d="M7 3H15M11 3V21M7 21H15"
+                  stroke="#111111"
+                  strokeWidth="1.5"
+                  strokeLinecap="round"
+                />
+              )}
+            </svg>
+          ) : (
+            <svg
+              width="24"
+              height="24"
+              viewBox="0 0 24 24"
+              fill="none"
+              xmlns="http://www.w3.org/2000/svg"
+              className="-translate-x-3 -translate-y-3 drop-shadow-[0_2px_3px_rgba(0,0,0,0.65)]"
+              style={{
+                transform:
+                  cursorStyle === 'resize-ns'
+                    ? 'translate(-12px, -12px) rotate(90deg)'
+                    : cursorStyle === 'resize-nwse'
+                    ? 'translate(-12px, -12px) rotate(45deg)'
+                    : cursorStyle === 'resize-nesw'
+                    ? 'translate(-12px, -12px) rotate(-45deg)'
+                    : 'translate(-12px, -12px)',
+              }}
+            >
+              <path
+                d="M2 12L7 7.5V10.5H17V7.5L22 12L17 16.5V13.5H7V16.5L2 12Z"
+                fill="#FFFFFF"
+                stroke="#111111"
+                strokeWidth="1.5"
+                strokeLinejoin="round"
+              />
+            </svg>
+          )}
+        </div>
+      )}
 
       {/* Virtual Mouse Hover Tooltip */}
       {tooltip && (
@@ -836,7 +1113,7 @@ export const VirtualMouseOverlay: React.FC = () => {
         </div>
       )}
 
-      {/* Optional Floating Touchpad Panel (only shown when enabled in Settings > Mouse) */}
+      {/* Optional Floating Touchpad Panel */}
       {showPanel && (
         <div
           data-virtual-mouse="true"
@@ -916,7 +1193,7 @@ export const VirtualMouseOverlay: React.FC = () => {
             <span className="text-[10px] text-neutral-400 pointer-events-none text-center px-3 leading-snug">
               Slide to move · Tap = Click · 2x Tap = Double Click
               <br />
-              Tap-hold &amp; drag = Move Window · 2-finger/Hold = Right-click · 2-finger drag = Scroll
+              Tap-hold &amp; drag = Drag/Select · 2-finger/Hold = Right-click · 2-finger drag = Scroll
             </span>
           </div>
 

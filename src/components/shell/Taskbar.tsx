@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import {
   BatteryCharging,
+  Download,
   Layers,
   MessageSquare,
   MousePointer2,
@@ -40,6 +41,7 @@ export const Taskbar: React.FC = () => {
     toggleShowDesktop,
     getAppDefinition,
     isMobile,
+    appUpdateInfo,
   } = useOS();
 
   const [now, setNow] = useState(new Date());
@@ -252,6 +254,20 @@ export const Taskbar: React.FC = () => {
 
       {/* Right / Bottom System Tray */}
       <div className={`flex items-center shrink-0 ${isVertical ? 'flex-col w-full pb-1' : 'flex-row h-full'}`}>
+        {/* App Update Available Badge */}
+        {appUpdateInfo?.hasUpdate && (
+          <button
+            onClick={() => openApp('settings', { settingsTab: 'update' })}
+            className={`relative ${
+              isVertical ? 'w-full h-10' : 'h-full px-2'
+            } flex items-center justify-center hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer`}
+            title={`Update available: v${appUpdateInfo.latestVersionName} (Build ${appUpdateInfo.latestVersionCode})`}
+          >
+            <Download className="w-3.5 h-3.5 text-[#0078D7] dark:text-sky-400" />
+            <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-amber-500 ring-2 ring-white/80 dark:ring-neutral-900" />
+          </button>
+        )}
+
         {/* Virtual Mouse Mode Toggle (visible on both desktop & mobile) */}
         <button
           data-mouse-mode-toggle="true"

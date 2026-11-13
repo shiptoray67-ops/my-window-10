@@ -10,10 +10,12 @@ import {
   InstalledWebApp,
   NotificationItem,
   PowerPhase,
+  SnapZone,
   StoreGameId,
   SystemSettings,
   VfsNode,
   WindowInstance,
+  WindowSnapState,
 } from '../types/os';
 import { BUILTIN_APPS, DEFAULT_SETTINGS, STORE_GAMES } from '../data/apps';
 import {
@@ -25,11 +27,30 @@ import {
   ROOT_IDS,
 } from '../utils/vfs';
 import { soundEngine } from '../utils/sound';
+import { AppUpdateCheckResult, checkForAppUpdate } from '../utils/appUpdater';
 
 const SETTINGS_KEY = 'win10_settings_v1';
 const DESKTOP_ICONS_KEY = 'win10_desktop_icons_v1';
 const NOTIFICATIONS_KEY = 'win10_notifications_v1';
 const ALARMS_KEY = 'win10_alarms_v1';
+const WINDOW_BOUNDS_KEY = 'win10_window_bounds_v1';
+
+interface SavedAppBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  isMaximized?: boolean;
+  snapState?: WindowSnapState;
+  prevBounds?: { x: number; y: number; width: number; height: number };
+}
+
+export interface WorkAreaRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
 
 export type TrayFlyout = 'clock' | 'volume' | 'network' | 'battery' | 'language' | null;
 
@@ -62,7 +83,8 @@ interface OSContextValue {
   maximizeWindow: (instanceId: string) => void;
   restoreWindow: (instanceId: string) => void;
   updateWindowBounds: (instanceId: string, bounds: Partial<Pick<WindowInstance, 'x' | 'y' | 'width' | 'height' | 'isMaximized' | 'snapState' | 'prevBounds'>>) => void;
-  snapWindow: (instanceId: string, side: 'left' | 'right' | 'top') => void;
+  snapWindow: (instanceId: string, side: SnapZone) => void;
+  getWorkAreaRect: () => WorkAreaRect;
   toggleShowDesktop: () => void;
   startMenuOpen: boolean;
   setStartMenuOpen: React.Dispatch<React.SetStateAction<boolean>>;
@@ -106,6 +128,10 @@ interface OSContextValue {
   setAlarms: React.Dispatch<React.SetStateAction<AlarmItem[]>>;
   isMobile: boolean;
   resetAllSimulatorData: () => Promise<void>;
+  appUpdateInfo: AppUpdateCheckResult | null;
+  checkingAppUpdate: boolean;
+  appUpdateError: string | null;
+  runAppUpdateCheck: (silent?: boolean) => Promise<AppUpdateCheckResult | null>;
 }
 
 const OSContext = createContext<OSContextValue | null>(null);
@@ -188,6 +214,60 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     typeof window !== 'undefined' && window.innerWidth < 700 && window.innerHeight > window.innerWidth;
 
   const [isMobile, setIsMobile] = useState(checkIsPortraitMobile);
+  const [appUpdateInfo, setAppUpdateInfo] = useState<AppUpdateCheckResult | null>(null);
+  const [checkingAppUpdate, setCheckingAppUpdate] = useState(false);
+  const [appUpdateError, setAppUpdateError] = useState<string | null>(null);
+  const startupUpdateCheckedRef = useRef(false);
+
+  const savedBoundsRef = useRef<Record<string, SavedAppBounds>>(
+    (() => {
+      try {
+        const raw = localStorage.getItem(WINDOW_BOUNDS_KEY);
+        return raw ? JSON.parse(raw) : {};
+      } catch {
+        return {};
+      }
+    })()
+  );
+
+  const persistWindowBounds = useCallback((appId: AppId, win: Pick<WindowInstance, 'x' | 'y' | 'width' | 'height' | 'isMaximized' | 'snapState' | 'prevBounds'>) => {
+    savedBoundsRef.current[appId] = {
+      x: win.x,
+      y: win.y,
+      width: win.width,
+      height: win.height,
+      isMaximized: win.isMaximized,
+      snapState: win.snapState,
+      prevBounds: win.prevBounds,
+    };
+    try {
+      localStorage.setItem(WINDOW_BOUNDS_KEY, JSON.stringify(savedBoundsRef.current));
+    } catch {
+      // ignore storage quota
+    }
+  }, []);
+
+  const getWorkAreaRect = useCallback((): WorkAreaRect => {
+    const vw = typeof window !== 'undefined' ? window.innerWidth : 1280;
+    const vh = typeof window !== 'undefined' ? window.innerHeight : 760;
+    const scale = (settings.resolutionScale || 100) / 100;
+    const tbSize = Math.round((isMobile ? 48 : 44) * scale);
+    const railSize = Math.round(52 * scale);
+
+    if (isMobile) {
+      return { x: 0, y: 0, width: vw, height: Math.max(240, vh - tbSize) };
+    }
+    if (settings.taskbarPosition === 'top') {
+      return { x: 0, y: tbSize, width: vw, height: Math.max(240, vh - tbSize) };
+    }
+    if (settings.taskbarPosition === 'left') {
+      return { x: railSize, y: 0, width: Math.max(320, vw - railSize), height: vh };
+    }
+    if (settings.taskbarPosition === 'right') {
+      return { x: 0, y: 0, width: Math.max(320, vw - railSize), height: vh };
+    }
+    return { x: 0, y: 0, width: vw, height: Math.max(240, vh - tbSize) };
+  }, [isMobile, settings.resolutionScale, settings.taskbarPosition]);
 
   const lastTriggeredAlarmMinuteRef = useRef<string>('');
 
@@ -366,6 +446,45 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     }, 4000);
     return () => clearInterval(timer);
   }, [alarms, addNotification]);
+
+  const runAppUpdateCheck = useCallback(
+    async (silent = false): Promise<AppUpdateCheckResult | null> => {
+      setCheckingAppUpdate(true);
+      if (!silent) setAppUpdateError(null);
+      try {
+        const result = await checkForAppUpdate();
+        setAppUpdateInfo(result);
+        setAppUpdateError(null);
+        if (result.hasUpdate) {
+          addNotification(
+            'Windows Update',
+            `Update available: v${result.latestVersionName}`,
+            `Build ${result.latestVersionCode} is ready to download and install in Settings > Update.`
+          );
+        }
+        return result;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Unable to check for updates right now.';
+        if (!silent) {
+          setAppUpdateError(msg);
+        }
+        return null;
+      } finally {
+        setCheckingAppUpdate(false);
+      }
+    },
+    [addNotification]
+  );
+
+  // Silent update check once when session enters desktop
+  useEffect(() => {
+    if (powerPhase !== 'desktop' || startupUpdateCheckedRef.current) return;
+    startupUpdateCheckedRef.current = true;
+    const t = window.setTimeout(() => {
+      void runAppUpdateCheck(true);
+    }, 2500);
+    return () => window.clearTimeout(t);
+  }, [powerPhase, runAppUpdateCheck]);
 
   const updateSettings = useCallback((patch: Partial<SystemSettings>) => {
     setSettings((prev) => ({ ...prev, ...patch }));
@@ -650,17 +769,36 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
       soundEngine.playClick();
       topZRef.current += 1;
-      const vw = typeof window !== 'undefined' ? window.innerWidth : 1280;
-      const vh = typeof window !== 'undefined' ? window.innerHeight : 760;
-      const taskbarClearance = Math.round(48 * ((settings.resolutionScale || 100) / 100));
-      const width = Math.min(def.defaultWidth, Math.max(260, vw - 20));
-      const height = Math.min(
-        def.defaultHeight,
-        Math.max(200, vh - taskbarClearance - (settings.mouseMode && settings.showTouchpadPanel ? 140 : 16))
+      const work = getWorkAreaRect();
+      const defaultW = Math.min(work.width, Math.max(320, Math.round(work.width * 0.6)));
+      const defaultH = Math.min(
+        work.height,
+        Math.max(
+          240,
+          Math.round(work.height * 0.65) - (settings.mouseMode && settings.showTouchpadPanel ? 80 : 0)
+        )
       );
-      const cascade = (windows.length % 7) * 22;
-      const x = Math.max(8, Math.min(vw - width - 8, Math.round((vw - width) / 2) + cascade - 32));
-      const y = Math.max(8, Math.min(vh - taskbarClearance - height - 8, Math.round((vh - taskbarClearance - height) / 2) + cascade - 24));
+
+      const saved = savedBoundsRef.current[appId];
+      const cascade = (windows.length % 7) * 20;
+
+      const width = saved
+        ? Math.min(work.width, Math.max(320, saved.width))
+        : defaultW;
+      const height = saved
+        ? Math.min(work.height, Math.max(240, saved.height))
+        : defaultH;
+
+      const rawX = saved
+        ? saved.x
+        : work.x + Math.round((work.width - width) / 2) + cascade - 24;
+      const rawY = saved
+        ? saved.y
+        : work.y + Math.round((work.height - height) / 2) + cascade - 20;
+
+      // Guarantee titlebar always stays reachable inside work area
+      const x = Math.max(work.x - width + 120, Math.min(work.x + work.width - 120, Math.max(work.x, rawX)));
+      const y = Math.max(work.y, Math.min(work.y + work.height - 40, rawY));
 
       const instanceId = `win-${appId}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
       const win: WindowInstance = {
@@ -671,16 +809,29 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
         y,
         width,
         height,
+        prevBounds: saved?.prevBounds,
         isMinimized: false,
-        isMaximized: vw < 700 && vh > vw && !settings.mouseMode,
-        snapState: 'none',
+        isMaximized:
+          isMobile && !settings.mouseMode
+            ? true
+            : Boolean(saved?.isMaximized),
+        snapState: saved?.snapState || 'none',
         zIndex: topZRef.current,
         launchPayload,
       };
       setWindows((prev) => [...prev, win]);
       setActiveWindowId(instanceId);
     },
-    [closeAllOverlays, focusWindow, getAppDefinition, settings.mouseMode, settings.resolutionScale, settings.showTouchpadPanel, windows]
+    [
+      closeAllOverlays,
+      focusWindow,
+      getAppDefinition,
+      getWorkAreaRect,
+      isMobile,
+      settings.mouseMode,
+      settings.showTouchpadPanel,
+      windows,
+    ]
   );
 
   const openFileWithDefaultApp = useCallback(
@@ -710,6 +861,10 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
   const closeWindow = useCallback((instanceId: string) => {
     setWindows((prev) => {
+      const target = prev.find((w) => w.instanceId === instanceId);
+      if (target) {
+        persistWindowBounds(target.appId, target);
+      }
       const next = prev.filter((w) => w.instanceId !== instanceId);
       setActiveWindowId((curr) => {
         if (curr !== instanceId) return curr;
@@ -718,7 +873,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       });
       return next;
     });
-  }, []);
+  }, [persistWindowBounds]);
 
   const minimizeWindow = useCallback((instanceId: string) => {
     setWindows((prev) =>
@@ -730,42 +885,60 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   const maximizeWindow = useCallback((instanceId: string) => {
     topZRef.current += 1;
     setWindows((prev) =>
-      prev.map((w) =>
-        w.instanceId === instanceId
-          ? {
-              ...w,
-              isMaximized: true,
-              snapState: 'none',
-              zIndex: topZRef.current,
-              prevBounds: w.isMaximized ? w.prevBounds : { x: w.x, y: w.y, width: w.width, height: w.height },
-            }
-          : w
-      )
+      prev.map((w) => {
+        if (w.instanceId !== instanceId) return w;
+        const nextWin: WindowInstance = {
+          ...w,
+          isMaximized: true,
+          snapState: 'none',
+          zIndex: topZRef.current,
+          prevBounds:
+            !w.isMaximized && w.snapState === 'none'
+              ? { x: w.x, y: w.y, width: w.width, height: w.height }
+              : w.prevBounds,
+        };
+        persistWindowBounds(w.appId, nextWin);
+        return nextWin;
+      })
     );
     setActiveWindowId(instanceId);
-  }, []);
+  }, [persistWindowBounds]);
 
   const restoreWindow = useCallback((instanceId: string) => {
     topZRef.current += 1;
+    const work = getWorkAreaRect();
     setWindows((prev) =>
       prev.map((w) => {
         if (w.instanceId !== instanceId) return w;
-        const bounds = w.prevBounds || { x: 80, y: 60, width: w.width, height: w.height };
-        return {
+        const fallbackW = Math.min(work.width, Math.max(320, Math.round(work.width * 0.6)));
+        const fallbackH = Math.min(work.height, Math.max(240, Math.round(work.height * 0.65)));
+        const bounds = w.prevBounds || {
+          x: work.x + Math.round((work.width - fallbackW) / 2),
+          y: work.y + Math.round((work.height - fallbackH) / 2),
+          width: fallbackW,
+          height: fallbackH,
+        };
+        const width = Math.min(work.width, Math.max(320, bounds.width));
+        const height = Math.min(work.height, Math.max(240, bounds.height));
+        const x = Math.max(work.x - width + 120, Math.min(work.x + work.width - 120, bounds.x));
+        const y = Math.max(work.y, Math.min(work.y + work.height - 40, bounds.y));
+        const nextWin: WindowInstance = {
           ...w,
           isMaximized: false,
           isMinimized: false,
           snapState: 'none',
-          x: bounds.x,
-          y: bounds.y,
-          width: bounds.width,
-          height: bounds.height,
+          x,
+          y,
+          width,
+          height,
           zIndex: topZRef.current,
         };
+        persistWindowBounds(w.appId, nextWin);
+        return nextWin;
       })
     );
     setActiveWindowId(instanceId);
-  }, []);
+  }, [getWorkAreaRect, persistWindowBounds]);
 
   const updateWindowBounds = useCallback(
     (
@@ -773,43 +946,107 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       bounds: Partial<Pick<WindowInstance, 'x' | 'y' | 'width' | 'height' | 'isMaximized' | 'snapState' | 'prevBounds'>>
     ) => {
       setWindows((prev) =>
-        prev.map((w) => (w.instanceId === instanceId ? { ...w, ...bounds } : w))
+        prev.map((w) => {
+          if (w.instanceId !== instanceId) return w;
+          const nextWin = { ...w, ...bounds };
+          persistWindowBounds(w.appId, nextWin);
+          return nextWin;
+        })
       );
     },
-    []
+    [persistWindowBounds]
   );
 
-  const snapWindow = useCallback((instanceId: string, side: 'left' | 'right' | 'top') => {
+  const snapWindow = useCallback((instanceId: string, side: SnapZone) => {
     if (side === 'top') {
       maximizeWindow(instanceId);
       return;
     }
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-    const tbSize = 44;
-    const halfW = Math.floor(vw / 2);
-    const workH = vh - (settings.taskbarPosition === 'bottom' || settings.taskbarPosition === 'top' ? tbSize : 0);
-    const topOffset = settings.taskbarPosition === 'top' ? tbSize : 0;
+    const work = getWorkAreaRect();
+    const halfW = Math.floor(work.width / 2);
+    const halfH = Math.floor(work.height / 2);
     topZRef.current += 1;
+
+    let targetX = work.x;
+    let targetY = work.y;
+    let targetW = work.width;
+    let targetH = work.height;
+
+    switch (side) {
+      case 'left':
+        targetX = work.x;
+        targetY = work.y;
+        targetW = halfW;
+        targetH = work.height;
+        break;
+      case 'right':
+        targetX = work.x + halfW;
+        targetY = work.y;
+        targetW = work.width - halfW;
+        targetH = work.height;
+        break;
+      case 'top-half':
+        targetX = work.x;
+        targetY = work.y;
+        targetW = work.width;
+        targetH = halfH;
+        break;
+      case 'bottom-half':
+        targetX = work.x;
+        targetY = work.y + halfH;
+        targetW = work.width;
+        targetH = work.height - halfH;
+        break;
+      case 'tl':
+        targetX = work.x;
+        targetY = work.y;
+        targetW = halfW;
+        targetH = halfH;
+        break;
+      case 'tr':
+        targetX = work.x + halfW;
+        targetY = work.y;
+        targetW = work.width - halfW;
+        targetH = halfH;
+        break;
+      case 'bl':
+        targetX = work.x;
+        targetY = work.y + halfH;
+        targetW = halfW;
+        targetH = work.height - halfH;
+        break;
+      case 'br':
+        targetX = work.x + halfW;
+        targetY = work.y + halfH;
+        targetW = work.width - halfW;
+        targetH = work.height - halfH;
+        break;
+    }
 
     setWindows((prev) =>
       prev.map((w) => {
         if (w.instanceId !== instanceId) return w;
-        return {
+        const nextWin: WindowInstance = {
           ...w,
-          prevBounds: w.snapState === 'none' && !w.isMaximized ? { x: w.x, y: w.y, width: w.width, height: w.height } : w.prevBounds,
+          prevBounds:
+            w.snapState === 'none' && !w.isMaximized
+              ? { x: w.x, y: w.y, width: w.width, height: w.height }
+              : w.prevBounds,
           isMaximized: false,
+          isMinimized: false,
           snapState: side,
-          x: side === 'left' ? 0 : halfW,
-          y: topOffset,
-          width: halfW,
-          height: workH,
+          x: targetX,
+          y: targetY,
+          width: targetW,
+          height: targetH,
           zIndex: topZRef.current,
         };
+        persistWindowBounds(w.appId, nextWin);
+        return nextWin;
       })
     );
     setActiveWindowId(instanceId);
-  }, [maximizeWindow, settings.taskbarPosition]);
+  }, [getWorkAreaRect, maximizeWindow, persistWindowBounds]);
 
   const toggleShowDesktop = useCallback(() => {
     closeAllOverlays();
@@ -971,6 +1208,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     localStorage.removeItem(DESKTOP_ICONS_KEY);
     localStorage.removeItem(NOTIFICATIONS_KEY);
     localStorage.removeItem(ALARMS_KEY);
+    localStorage.removeItem(WINDOW_BOUNDS_KEY);
+    savedBoundsRef.current = {};
     await clearAllVfs();
     const freshSeed = createInitialVfsSeed();
     await putVfsNodes(freshSeed);
@@ -1096,6 +1335,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       restoreWindow,
       updateWindowBounds,
       snapWindow,
+      getWorkAreaRect,
       toggleShowDesktop,
       startMenuOpen,
       setStartMenuOpen,
@@ -1139,6 +1379,10 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       setAlarms,
       isMobile,
       resetAllSimulatorData,
+      appUpdateInfo,
+      checkingAppUpdate,
+      appUpdateError,
+      runAppUpdateCheck,
     }),
     [
       powerPhase,
@@ -1169,6 +1413,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       restoreWindow,
       updateWindowBounds,
       snapWindow,
+      getWorkAreaRect,
       toggleShowDesktop,
       startMenuOpen,
       searchQuery,
@@ -1202,6 +1447,10 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       alarms,
       isMobile,
       resetAllSimulatorData,
+      appUpdateInfo,
+      checkingAppUpdate,
+      appUpdateError,
+      runAppUpdateCheck,
     ]
   );
 

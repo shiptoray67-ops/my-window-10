@@ -51,6 +51,19 @@ export interface AppDefinition {
   description?: string;
 }
 
+export type SnapZone =
+  | 'left'
+  | 'right'
+  | 'top'
+  | 'top-half'
+  | 'bottom-half'
+  | 'tl'
+  | 'tr'
+  | 'bl'
+  | 'br';
+
+export type WindowSnapState = 'none' | Exclude<SnapZone, 'top'>;
+
 export interface WindowInstance {
   instanceId: string;
   appId: AppId;
@@ -62,7 +75,7 @@ export interface WindowInstance {
   prevBounds?: { x: number; y: number; width: number; height: number };
   isMinimized: boolean;
   isMaximized: boolean;
-  snapState: 'none' | 'left' | 'right';
+  snapState: WindowSnapState;
   zIndex: number;
   launchPayload?: {
     fileId?: string;

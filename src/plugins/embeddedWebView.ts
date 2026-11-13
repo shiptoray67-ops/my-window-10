@@ -1,5 +1,14 @@
 import { registerPlugin, PluginListenerHandle } from '@capacitor/core';
 
+export type NativeCursorType =
+  | 'arrow'
+  | 'hand'
+  | 'text'
+  | 'resize-ew'
+  | 'resize-ns'
+  | 'resize-nwse'
+  | 'resize-nesw';
+
 export interface EmbeddedWebViewCreateOptions {
   id: string;
   url: string;
@@ -86,6 +95,18 @@ export interface EmbeddedWebViewFindResultsEvent {
   numberOfMatches: number;
 }
 
+export interface EmbeddedWebViewUpdateStatusEvent {
+  status: 'downloading' | 'installing' | 'needs_permission' | 'error';
+  progress: number;
+  message: string;
+}
+
+export interface AppVersionInfo {
+  versionCode: number;
+  versionName: string;
+  packageName: string;
+}
+
 export interface EmbeddedWebViewPluginInterface {
   create(options: EmbeddedWebViewCreateOptions): Promise<void>;
   setBounds(options: EmbeddedWebViewBoundsOptions): Promise<void>;
@@ -107,6 +128,76 @@ export interface EmbeddedWebViewPluginInterface {
   }): Promise<void>;
   getState(options: { id: string }): Promise<EmbeddedWebViewState>;
   clearData(): Promise<void>;
+
+  // Always-on-top native cursor & touch interception
+  showCursor(options?: {
+    x?: number;
+    y?: number;
+    devicePixelRatio?: number;
+    type?: NativeCursorType;
+  }): Promise<void>;
+  hideCursor(): Promise<void>;
+  moveCursor(options: {
+    x: number;
+    y: number;
+    devicePixelRatio?: number;
+  }): Promise<void>;
+  setCursorStyle(options: { type: NativeCursorType }): Promise<void>;
+  setMouseModeTouchIntercept(options: { enabled: boolean }): Promise<void>;
+
+  // Native MotionEvent forwarding into active WebView
+  injectTap(options: {
+    id?: string;
+    x: number;
+    y: number;
+    devicePixelRatio?: number;
+  }): Promise<void>;
+  injectDoubleTap(options: {
+    id?: string;
+    x: number;
+    y: number;
+    devicePixelRatio?: number;
+  }): Promise<void>;
+  injectLongPress(options: {
+    id?: string;
+    x: number;
+    y: number;
+    devicePixelRatio?: number;
+  }): Promise<void>;
+  injectDrag(options: {
+    id?: string;
+    phase: 'start' | 'move' | 'end';
+    x: number;
+    y: number;
+    devicePixelRatio?: number;
+  }): Promise<void>;
+  injectScroll(options: {
+    id?: string;
+    dx: number;
+    dy: number;
+    x: number;
+    y: number;
+    devicePixelRatio?: number;
+  }): Promise<void>;
+  injectHover(options: {
+    id?: string;
+    x: number;
+    y: number;
+    devicePixelRatio?: number;
+  }): Promise<void>;
+  injectPinch(options: {
+    id?: string;
+    scaleDelta: number;
+    x: number;
+    y: number;
+    devicePixelRatio?: number;
+  }): Promise<{ zoom: number }>;
+
+  // In-app APK updater
+  getAppVersion(): Promise<AppVersionInfo>;
+  downloadAndInstallUpdate(options: { url: string; filename?: string }): Promise<void>;
+  openInstallPermissionSettings(): Promise<void>;
+  installPendingUpdate(): Promise<{ launched: boolean; needsPermission: boolean }>;
 
   addListener(
     eventName: 'urlChanged',
@@ -143,6 +234,10 @@ export interface EmbeddedWebViewPluginInterface {
   addListener(
     eventName: 'findResults',
     listenerFunc: (event: EmbeddedWebViewFindResultsEvent) => void
+  ): Promise<PluginListenerHandle>;
+  addListener(
+    eventName: 'updateStatus',
+    listenerFunc: (event: EmbeddedWebViewUpdateStatusEvent) => void
   ): Promise<PluginListenerHandle>;
 }
 

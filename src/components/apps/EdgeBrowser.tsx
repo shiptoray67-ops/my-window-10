@@ -1153,6 +1153,7 @@ export const EdgeBrowser: React.FC<{
       return (
         <div
           data-embedded-webview-placeholder={activeTab.id}
+          data-native-webview-active={shouldShowNative ? 'true' : 'false'}
           className="w-full h-full bg-transparent flex items-center justify-center"
         >
           {!shouldShowNative && (
