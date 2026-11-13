@@ -1,0 +1,139 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@layer base {
+  :root {
+    --win-accent: #0078D7;
+    --win-accent-hover: #106EBE;
+    --win-accent-light: rgba(0, 120, 215, 0.14);
+    font-family: 'Segoe UI', 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  }
+
+  * {
+    box-sizing: border-box;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  html,
+  body,
+  #root {
+    width: 100dvw;
+    height: 100dvh;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
+
+  .font-mono {
+    font-family: 'JetBrains Mono', 'Cascadia Code', 'Consolas', monospace;
+  }
+}
+
+/* Windows 10 Boot Ring Spinner */
+@keyframes win10-orbit {
+  0% {
+    transform: rotate(225deg);
+    opacity: 1;
+    animation-timing-function: ease-out;
+  }
+  7% {
+    transform: rotate(345deg);
+    animation-timing-function: linear;
+  }
+  30% {
+    transform: rotate(455deg);
+    animation-timing-function: ease-in-out;
+  }
+  39% {
+    transform: rotate(690deg);
+    animation-timing-function: linear;
+  }
+  70% {
+    transform: rotate(815deg);
+    opacity: 1;
+    animation-timing-function: ease-out;
+  }
+  75% {
+    transform: rotate(945deg);
+    animation-timing-function: ease-out;
+  }
+  76% {
+    transform: rotate(945deg);
+    opacity: 0;
+  }
+  100% {
+    transform: rotate(945deg);
+    opacity: 0;
+  }
+}
+
+.win10-loader-dot {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  transform: rotate(225deg);
+  animation: win10-orbit 4.5s infinite;
+}
+
+.win10-loader-dot::after {
+  content: "";
+  position: absolute;
+  width: 5px;
+  height: 5px;
+  border-radius: 9999px;
+  background: #ffffff;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+/* Custom Windows 10 Thin Scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(128, 128, 128, 0.35);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(128, 128, 128, 0.55);
+}
+
+/* Fluent Acrylic Surface Helper */
+.fluent-acrylic-dark {
+  background-color: rgba(28, 28, 30, 0.82);
+  backdrop-filter: blur(28px) saturate(150%);
+  -webkit-backdrop-filter: blur(28px) saturate(150%);
+}
+
+.fluent-acrylic-light {
+  background-color: rgba(242, 242, 247, 0.84);
+  backdrop-filter: blur(28px) saturate(150%);
+  -webkit-backdrop-filter: blur(28px) saturate(150%);
+}
+
+/* Tabular figures for clocks, Task Manager, Calculator */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Virtual Mouse / Touchpad Hover Highlights */
+[data-vm-hover="true"] {
+  box-shadow: inset 0 0 0 1.5px var(--win-accent), 0 0 0 1px rgba(255, 255, 255, 0.25) !important;
+  filter: brightness(1.08);
+  transition: box-shadow 0.08s ease, filter 0.08s ease;
+}
+
+/* Force desktop-style windows when Virtual Mouse mode is active */
+.vm-cursor-active * {
+  user-select: none;
+}
+

@@ -1,0 +1,1 @@
+import{t as e}from"./index-ClnOLfp7.js";var t=class extends e{async open(e){return console.log(`open`,e),e}async clearCookies(){console.log(`cleanCookies`)}async openWebView(e){return console.log(`openWebView`,e),e}async close(){console.log(`close`)}async setUrl(e){console.log(`setUrl`,e.url)}};export{t as InAppBrowserWeb};

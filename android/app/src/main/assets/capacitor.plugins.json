@@ -1,0 +1,14 @@
+[
+	{
+		"pkg": "@capacitor/screen-orientation",
+		"classpath": "com.capacitorjs.plugins.screenorientation.ScreenOrientationPlugin"
+	},
+	{
+		"pkg": "@capacitor/status-bar",
+		"classpath": "com.capacitorjs.plugins.statusbar.StatusBarPlugin"
+	},
+	{
+		"pkg": "@capgo/inappbrowser",
+		"classpath": "ee.forgr.capacitor_inappbrowser.InAppBrowserPlugin"
+	}
+]

@@ -1,0 +1,6 @@
+{
+  "name": "Windows 10 Desktop Simulator",
+  "description": "A complete, responsive Windows 10 desktop environment running locally in your browser with virtual file system, Edge browser, File Explorer, Microsoft Store games, Settings, and offline PWA support.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
