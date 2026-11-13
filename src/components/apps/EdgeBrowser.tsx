@@ -1,41 +1,69 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Capacitor } from '@capacitor/core';
-import { InAppBrowser, ToolBarType } from '@capgo/inappbrowser';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Capacitor, PluginListenerHandle } from '@capacitor/core';
 import {
+  ArrowDown,
   ArrowLeft,
   ArrowRight,
+  ArrowUp,
   Bookmark,
+  Check,
+  Copy,
+  Download,
   ExternalLink,
+  EyeOff,
   Globe,
   History,
   Home,
-  Minimize2,
+  Laptop,
+  MoreHorizontal,
   Plus,
   RotateCw,
   Search,
+  Share2,
   ShieldAlert,
   Smartphone,
   Star,
   Trash2,
   X,
+  ZoomIn,
+  ZoomOut,
 } from 'lucide-react';
 import { useOS } from '../../context/OSContext';
-import { EdgeBookmark, EdgeHistoryItem, WindowInstance } from '../../types/os';
+import {
+  EmbeddedWebView,
+} from '../../plugins/embeddedWebView';
+import {
+  BrowserDownloadItem,
+  EdgeBookmark,
+  EdgeHistoryItem,
+  SearchEngine,
+  WindowInstance,
+} from '../../types/os';
 
 interface Tab {
   id: string;
   title: string;
   url: string;
+  favicon?: string;
+  incognito: boolean;
+  desktopMode: boolean;
+  zoom: number;
+  progress: number;
+  isLoading: boolean;
+  canGoBack: boolean;
+  canGoForward: boolean;
+  nativeCreated: boolean;
   historyStack: string[];
   historyIndex: number;
 }
 
 const BOOKMARKS_KEY = 'win10_edge_bookmarks_v1';
 const HISTORY_KEY = 'win10_edge_history_v1';
+const DOWNLOADS_KEY = 'win10_edge_downloads_v1';
 const IFRAME_LOAD_TIMEOUT_MS = 5000;
 
-// Domains known to send X-Frame-Options: DENY/SAMEORIGIN or strict CSP frame-ancestors on web iframes
-const IFRAME_BLOCKED_DOMAINS: Array<{ domain: string; label: string }> = [
+// Used ONLY for non-native web browser preview where third-party sites send X-Frame-Options
+const WEB_PREVIEW_IFRAME_BLOCKED: Array<{ domain: string; label: string }> = [
   { domain: 'm.facebook.com', label: 'Facebook' },
   { domain: 'facebook.com', label: 'Facebook' },
   { domain: 'fb.com', label: 'Facebook' },
@@ -43,10 +71,10 @@ const IFRAME_BLOCKED_DOMAINS: Array<{ domain: string; label: string }> = [
   { domain: 'youtube.com', label: 'YouTube' },
   { domain: 'youtu.be', label: 'YouTube' },
   { domain: 'instagram.com', label: 'Instagram' },
-  { domain: 'twitter.com', label: 'Twitter' },
-  { domain: 'x.com', label: 'X (Twitter)' },
-  { domain: 'web.whatsapp.com', label: 'WhatsApp' },
+  { domain: 'web.whatsapp.com', label: 'WhatsApp Web' },
   { domain: 'whatsapp.com', label: 'WhatsApp' },
+  { domain: 'twitter.com', label: 'Twitter' },
+  { domain: 'x.com', label: 'X' },
   { domain: 'linkedin.com', label: 'LinkedIn' },
   { domain: 'netflix.com', label: 'Netflix' },
   { domain: 'amazon.com', label: 'Amazon' },
@@ -54,67 +82,31 @@ const IFRAME_BLOCKED_DOMAINS: Array<{ domain: string; label: string }> = [
   { domain: 'reddit.com', label: 'Reddit' },
   { domain: 'discord.com', label: 'Discord' },
   { domain: 'tiktok.com', label: 'TikTok' },
-  { domain: 'twitch.tv', label: 'Twitch' },
-  { domain: 'spotify.com', label: 'Spotify' },
   { domain: 'bing.com', label: 'Bing' },
   { domain: 'duckduckgo.com', label: 'DuckDuckGo' },
-  { domain: 'apple.com', label: 'Apple' },
-  { domain: 'microsoft.com', label: 'Microsoft' },
-  { domain: 'openai.com', label: 'OpenAI' },
-  { domain: 'chatgpt.com', label: 'ChatGPT' },
-  { domain: 'paypal.com', label: 'PayPal' },
-  { domain: 'dropbox.com', label: 'Dropbox' },
-  { domain: 'notion.so', label: 'Notion' },
-  { domain: 'figma.com', label: 'Figma' },
-  { domain: 'slack.com', label: 'Slack' },
-  { domain: 'pinterest.com', label: 'Pinterest' },
-  { domain: 'yahoo.com', label: 'Yahoo' },
-  { domain: 'zoom.us', label: 'Zoom' },
 ];
 
 const DEFAULT_BOOKMARKS: EdgeBookmark[] = [
+  { id: 'bm-google', title: 'Google', url: 'https://www.google.com' },
+  { id: 'bm-youtube', title: 'YouTube', url: 'https://www.youtube.com' },
   { id: 'bm-wiki', title: 'Wikipedia', url: 'https://en.wikipedia.org/wiki/Main_Page' },
-  { id: 'bm-w3', title: 'W3Schools', url: 'https://www.w3schools.com/html/default.asp' },
   { id: 'bm-osm', title: 'OpenStreetMap', url: 'https://www.openstreetmap.org/export/embed.html' },
-  { id: 'bm-archive', title: 'Internet Archive', url: 'https://archive.org' },
 ];
 
-const QUICK_LINKS = [
-  {
-    name: 'Wikipedia',
-    url: 'https://en.wikipedia.org/wiki/Main_Page',
-    desc: 'Free encyclopedia',
-  },
-  {
-    name: 'W3Schools',
-    url: 'https://www.w3schools.com/html/default.asp',
-    desc: 'Web tutorials & references',
-  },
-  {
-    name: 'OpenStreetMap',
-    url: 'https://www.openstreetmap.org/export/embed.html',
-    desc: 'Interactive world map',
-  },
-  {
-    name: 'Internet Archive',
-    url: 'https://archive.org',
-    desc: 'Digital library of web & media',
-  },
+const NEW_TAB_SHORTCUTS = [
+  { name: 'Google', url: 'https://www.google.com', color: '#4285F4', badge: 'G' },
+  { name: 'YouTube', url: 'https://www.youtube.com', color: '#FF0000', badge: 'YT' },
+  { name: 'Facebook', url: 'https://www.facebook.com', color: '#1877F2', badge: 'f' },
+  { name: 'Instagram', url: 'https://www.instagram.com', color: '#E1306C', badge: 'IG' },
+  { name: 'WhatsApp Web', url: 'https://web.whatsapp.com', color: '#25D366', badge: 'WA' },
+  { name: 'Wikipedia', url: 'https://en.wikipedia.org/wiki/Main_Page', color: '#3366CC', badge: 'W' },
 ];
 
-const POPULAR_SITES = [
-  { name: 'Google', url: 'https://www.google.com' },
-  { name: 'YouTube', url: 'https://www.youtube.com' },
-  { name: 'Facebook', url: 'https://www.facebook.com' },
-  { name: 'Instagram', url: 'https://www.instagram.com' },
-  { name: 'GitHub', url: 'https://github.com' },
-];
-
-function getSiteMeta(urlStr: string): { hostname: string; siteName: string; isBlocked: boolean } {
+function getSiteMeta(urlStr: string): { hostname: string; siteName: string; isWebIframeBlocked: boolean } {
   try {
     const parsed = new URL(urlStr);
     const host = parsed.hostname.toLowerCase();
-    const matched = IFRAME_BLOCKED_DOMAINS.find(
+    const matched = WEB_PREVIEW_IFRAME_BLOCKED.find(
       (entry) => host === entry.domain || host.endsWith(`.${entry.domain}`)
     );
     const cleanHost = host.replace(/^www\./, '');
@@ -126,75 +118,110 @@ function getSiteMeta(urlStr: string): { hostname: string; siteName: string; isBl
         .replace(/\b\w/g, (c) => c.toUpperCase());
 
     const searchQ = parsed.searchParams.get('q');
-    const titleName =
-      cleanHost.includes('google.') && searchQ
-        ? `Google: ${searchQ}`
-        : inferredName || urlStr;
+    const titleName = searchQ ? `${inferredName}: ${searchQ}` : inferredName || urlStr;
 
     return {
       hostname: cleanHost,
       siteName: titleName,
-      isBlocked: Boolean(matched),
+      isWebIframeBlocked: Boolean(matched),
     };
   } catch {
-    return { hostname: urlStr, siteName: urlStr, isBlocked: false };
+    return { hostname: urlStr, siteName: urlStr, isWebIframeBlocked: false };
   }
 }
 
-function normalizeAddressInput(rawInput: string): string {
+function buildSearchUrl(query: string, engine: SearchEngine): string {
+  const encoded = encodeURIComponent(query);
+  if (engine === 'bing') return `https://www.bing.com/search?q=${encoded}`;
+  if (engine === 'duckduckgo') return `https://duckduckgo.com/?q=${encoded}`;
+  return `https://www.google.com/search?q=${encoded}`;
+}
+
+function normalizeAddressInput(rawInput: string, engine: SearchEngine): string {
   const trimmed = rawInput.trim();
   if (!trimmed) return 'edge://home';
-  if (trimmed === 'edge://home') {
-    return trimmed;
-  }
-  if (/^https?:\/\//i.test(trimmed)) {
-    return trimmed;
-  }
+  if (trimmed === 'edge://home') return trimmed;
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+
   const hasSpaces = /\s/.test(trimmed);
   const looksLikeLocalhost = /^localhost(:\d+)?(\/.*)?$/i.test(trimmed);
+  const looksLikeIp = /^\d{1,3}(\.\d{1,3}){3}(:\d+)?(\/.*)?$/.test(trimmed);
   const looksLikeDomain =
     !hasSpaces && /^[a-zA-Z0-9-]+(\.[a-zA-Z0-9-]+)+(:\d+)?(\/.*)?$/.test(trimmed);
 
-  if (looksLikeLocalhost) {
+  if (looksLikeLocalhost || looksLikeIp) {
     return `http://${trimmed}`;
   }
   if (looksLikeDomain) {
     return `https://${trimmed}`;
   }
-  // Treat plain text as a Google search query
-  return `https://www.google.com/search?q=${encodeURIComponent(trimmed)}`;
+  return buildSearchUrl(trimmed, engine);
+}
+
+function formatBytes(bytes: number): string {
+  if (!bytes || bytes <= 0) return 'Unknown size';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 export const EdgeBrowser: React.FC<{
   win: WindowInstance;
   standaloneUrl?: string;
 }> = ({ win, standaloneUrl }) => {
-  const { minimizeWindow } = useOS();
+  const {
+    windows,
+    settings,
+    updateSettings,
+    hasShellOverlay,
+    interactingWindowId,
+    installWebApp,
+    addNotification,
+  } = useOS();
+
   const isNative = Capacitor.isNativePlatform();
+  const searchEngine = settings.searchEngine || 'google';
+
+  const makeTabId = useCallback(
+    () => `${win.instanceId}-tab-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    [win.instanceId]
+  );
 
   const rawInitial = standaloneUrl || win.launchPayload?.url || 'edge://home';
-  const normalizedInitial = normalizeAddressInput(rawInitial);
+  const normalizedInitial = normalizeAddressInput(rawInitial, searchEngine);
   const initialMeta = normalizedInitial.startsWith('http')
     ? getSiteMeta(normalizedInitial)
     : null;
 
-  const [tabs, setTabs] = useState<Tab[]>([
+  const [tabs, setTabs] = useState<Tab[]>(() => [
     {
-      id: 'tab-1',
+      id: `${win.instanceId}-tab-init`,
       title: standaloneUrl
         ? win.title
         : normalizedInitial === 'edge://home'
         ? 'New tab'
         : initialMeta?.siteName || normalizedInitial,
       url: normalizedInitial,
+      incognito: false,
+      desktopMode: false,
+      zoom: 100,
+      progress: 0,
+      isLoading: normalizedInitial.startsWith('http'),
+      canGoBack: false,
+      canGoForward: false,
+      nativeCreated: false,
       historyStack: [normalizedInitial],
       historyIndex: 0,
     },
   ]);
-  const [activeTabId, setActiveTabId] = useState('tab-1');
+
+  const [activeTabId, setActiveTabId] = useState<string>(`${win.instanceId}-tab-init`);
   const activeTab = tabs.find((t) => t.id === activeTabId) || tabs[0];
-  const activeTabIdRef = useRef(activeTab.id);
-  activeTabIdRef.current = activeTab.id;
+
+  const tabsRef = useRef(tabs);
+  tabsRef.current = tabs;
+  const activeTabRef = useRef(activeTab);
+  activeTabRef.current = activeTab;
 
   const [addressInput, setAddressInput] = useState(activeTab.url);
   const [searchInput, setSearchInput] = useState('');
@@ -214,151 +241,37 @@ export const EdgeBrowser: React.FC<{
       return [];
     }
   });
-  const [drawer, setDrawer] = useState<'bookmarks' | 'history' | null>(null);
+  const [historySearch, setHistorySearch] = useState('');
+  const [downloads, setDownloads] = useState<BrowserDownloadItem[]>(() => {
+    try {
+      const raw = localStorage.getItem(DOWNLOADS_KEY);
+      return raw ? JSON.parse(raw) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  const [drawer, setDrawer] = useState<'bookmarks' | 'history' | 'downloads' | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [findBarOpen, setFindBarOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState('');
+  const [findMatchInfo, setFindMatchInfo] = useState<{ active: number; total: number }>({
+    active: 0,
+    total: 0,
+  });
+  const [installAppModal, setInstallAppModal] = useState(false);
+  const [installAppTitle, setInstallAppTitle] = useState('');
+  const [copiedToast, setCopiedToast] = useState(false);
+
+  // Web preview fallback state (only used when !isNative)
   const [reloadTick, setReloadTick] = useState(0);
+  const [webIframeStatus, setWebIframeStatus] = useState<'idle' | 'loading' | 'loaded' | 'blocked' | 'timeout'>('idle');
 
-  // 'idle' for edge://home, 'loading' / 'loaded' / 'blocked' / 'timeout' / 'native' for http(s)
-  const [pageStatus, setPageStatus] = useState<
-    'idle' | 'loading' | 'loaded' | 'blocked' | 'timeout' | 'native'
-  >(
-    normalizedInitial.startsWith('http')
-      ? isNative
-        ? 'native'
-        : initialMeta?.isBlocked
-        ? 'blocked'
-        : 'loading'
-      : 'idle'
-  );
-  const [nativeWebViewActive, setNativeWebViewActive] = useState(false);
-  const initialAutoOpenedRef = useRef(false);
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const createdWebViewsRef = useRef<Set<string>>(new Set());
+  const rafSyncRef = useRef<number | null>(null);
 
-  const openInNewTab = useCallback((url: string) => {
-    window.open(url, '_blank', 'noopener,noreferrer');
-  }, []);
-
-  const openNativeWebView = useCallback(async (url: string, title?: string) => {
-    const meta = getSiteMeta(url);
-    try {
-      setNativeWebViewActive(true);
-      await InAppBrowser.openWebView({
-        url,
-        title: title || meta.siteName || meta.hostname,
-        toolbarType: ToolBarType.NAVIGATION,
-        visibleTitle: true,
-        showReloadButton: true,
-        activeNativeNavigationForWebview: true,
-        isPresentAfterPageLoad: false,
-      });
-    } catch {
-      setNativeWebViewActive(false);
-    }
-  }, []);
-
-  const closeNativeWebView = useCallback(async () => {
-    try {
-      await InAppBrowser.close();
-    } catch {
-      // ignore if already dismissed
-    } finally {
-      setNativeWebViewActive(false);
-    }
-  }, []);
-
-  // Listen to native InAppBrowser URL navigation & close events so tabs/history stay in sync
-  useEffect(() => {
-    if (!isNative) return;
-    let mounted = true;
-    const handles: Array<{ remove: () => Promise<void> }> = [];
-
-    (async () => {
-      try {
-        const urlHandle = await InAppBrowser.addListener('urlChangeEvent', (ev) => {
-          if (!mounted || !ev?.url || !ev.url.startsWith('http')) return;
-          const meta = getSiteMeta(ev.url);
-          const curTabId = activeTabIdRef.current;
-          setTabs((prev) =>
-            prev.map((t) => {
-              if (t.id !== curTabId || t.url === ev.url) return t;
-              const nextStack = [...t.historyStack.slice(0, t.historyIndex + 1), ev.url];
-              return {
-                ...t,
-                title: meta.siteName,
-                url: ev.url,
-                historyStack: nextStack,
-                historyIndex: nextStack.length - 1,
-              };
-            })
-          );
-          setAddressInput(ev.url);
-          setHistoryList((prev) => {
-            if (prev[0]?.url === ev.url) return prev;
-            return [
-              { id: `h-${Date.now()}`, title: meta.siteName, url: ev.url, visitedAt: Date.now() },
-              ...prev,
-            ];
-          });
-        });
-        handles.push(urlHandle);
-
-        const closeHandle = await InAppBrowser.addListener('closeEvent', () => {
-          if (mounted) {
-            setNativeWebViewActive(false);
-          }
-        });
-        handles.push(closeHandle);
-      } catch {
-        // ignore outside native runtime
-      }
-    })();
-
-    return () => {
-      mounted = false;
-      handles.forEach((h) => {
-        h.remove().catch(() => {});
-      });
-    };
-  }, [isNative]);
-
-  // Auto-open on initial launch if launched directly onto a URL (native or blocked web site)
-  useEffect(() => {
-    if (!initialAutoOpenedRef.current && normalizedInitial.startsWith('http')) {
-      initialAutoOpenedRef.current = true;
-      if (isNative) {
-        void openNativeWebView(normalizedInitial, initialMeta?.siteName);
-      } else if (initialMeta?.isBlocked) {
-        openInNewTab(normalizedInitial);
-      }
-    }
-  }, [initialMeta?.isBlocked, initialMeta?.siteName, isNative, normalizedInitial, openInNewTab, openNativeWebView]);
-
-  // Sync address bar and evaluate active tab status when switching tabs or reloading
-  useEffect(() => {
-    setAddressInput(activeTab.url);
-
-    if (!activeTab.url.startsWith('http')) {
-      setPageStatus('idle');
-      return;
-    }
-
-    if (isNative) {
-      setPageStatus('native');
-      return;
-    }
-
-    const meta = getSiteMeta(activeTab.url);
-    if (meta.isBlocked) {
-      setPageStatus('blocked');
-      return;
-    }
-
-    setPageStatus('loading');
-    const timeoutId = window.setTimeout(() => {
-      setPageStatus((prev) => (prev === 'loading' ? 'timeout' : prev));
-    }, IFRAME_LOAD_TIMEOUT_MS);
-
-    return () => window.clearTimeout(timeoutId);
-  }, [activeTab.id, activeTab.url, isNative, reloadTick]);
-
+  // Persist bookmarks, history & downloads
   useEffect(() => {
     try {
       localStorage.setItem(BOOKMARKS_KEY, JSON.stringify(bookmarks));
@@ -369,110 +282,627 @@ export const EdgeBrowser: React.FC<{
 
   useEffect(() => {
     try {
-      localStorage.setItem(HISTORY_KEY, JSON.stringify(historyList.slice(0, 60)));
+      localStorage.setItem(HISTORY_KEY, JSON.stringify(historyList.slice(0, 150)));
     } catch {
       // ignore
     }
   }, [historyList]);
 
+  useEffect(() => {
+    try {
+      localStorage.setItem(DOWNLOADS_KEY, JSON.stringify(downloads.slice(0, 100)));
+    } catch {
+      // ignore
+    }
+  }, [downloads]);
+
+  // Check whether any higher-z window overlaps this browser window
+  const isCoveredByWindow = useMemo(() => {
+    return windows.some((other) => {
+      if (other.instanceId === win.instanceId || other.isMinimized || other.zIndex <= win.zIndex) {
+        return false;
+      }
+      if (other.isMaximized || win.isMaximized) return true;
+      const ax1 = win.x;
+      const ay1 = win.y;
+      const ax2 = win.x + win.width;
+      const ay2 = win.y + win.height;
+      const bx1 = other.x;
+      const by1 = other.y;
+      const bx2 = other.x + other.width;
+      const by2 = other.y + other.height;
+      return ax1 < bx2 && ax2 > bx1 && ay1 < by2 && ay2 > by1;
+    });
+  }, [windows, win.instanceId, win.isMaximized, win.x, win.y, win.width, win.height, win.zIndex]);
+
+  const shouldShowNative =
+    isNative &&
+    activeTab.url.startsWith('http') &&
+    !win.isMinimized &&
+    !hasShellOverlay &&
+    !isCoveredByWindow &&
+    interactingWindowId === null &&
+    !menuOpen &&
+    !installAppModal;
+
+  const shouldShowNativeRef = useRef(shouldShowNative);
+  shouldShowNativeRef.current = shouldShowNative;
+
+  const syncBoundsNow = useCallback(() => {
+    if (!isNative || !viewportRef.current) return;
+    const rect = viewportRef.current.getBoundingClientRect();
+    const tab = activeTabRef.current;
+    if (!tab || !tab.url.startsWith('http') || !createdWebViewsRef.current.has(tab.id)) return;
+    void EmbeddedWebView.setBounds({
+      id: tab.id,
+      x: rect.left,
+      y: rect.top,
+      width: rect.width,
+      height: rect.height,
+      devicePixelRatio: window.devicePixelRatio || 1,
+    });
+  }, [isNative]);
+
+  const scheduleSyncBounds = useCallback(() => {
+    if (!isNative) return;
+    if (rafSyncRef.current !== null) {
+      cancelAnimationFrame(rafSyncRef.current);
+    }
+    rafSyncRef.current = requestAnimationFrame(() => {
+      rafSyncRef.current = null;
+      syncBoundsNow();
+    });
+  }, [isNative, syncBoundsNow]);
+
+  // Helper to create or navigate a native tab WebView
+  const ensureOrLoadNativeTab = useCallback(
+    async (tab: Tab, url: string) => {
+      if (!isNative || !url.startsWith('http')) return;
+      const rect = viewportRef.current?.getBoundingClientRect() || {
+        left: win.x,
+        top: win.y + 80,
+        width: win.width,
+        height: Math.max(120, win.height - 90),
+      };
+      const visibleNow = shouldShowNativeRef.current && activeTabRef.current?.id === tab.id;
+
+      if (!createdWebViewsRef.current.has(tab.id)) {
+        createdWebViewsRef.current.add(tab.id);
+        setTabs((prev) =>
+          prev.map((t) => (t.id === tab.id ? { ...t, nativeCreated: true } : t))
+        );
+        try {
+          await EmbeddedWebView.create({
+            id: tab.id,
+            url,
+            x: rect.left,
+            y: rect.top,
+            width: rect.width,
+            height: rect.height,
+            devicePixelRatio: window.devicePixelRatio || 1,
+            desktopMode: tab.desktopMode,
+            incognito: tab.incognito,
+            zoom: tab.zoom,
+            visible: visibleNow,
+          });
+        } catch {
+          createdWebViewsRef.current.delete(tab.id);
+        }
+      } else {
+        try {
+          await EmbeddedWebView.setBounds({
+            id: tab.id,
+            x: rect.left,
+            y: rect.top,
+            width: rect.width,
+            height: rect.height,
+            devicePixelRatio: window.devicePixelRatio || 1,
+          });
+          await EmbeddedWebView.loadUrl({ id: tab.id, url });
+          if (visibleNow) {
+            await EmbeddedWebView.show({ id: tab.id });
+          }
+        } catch {
+          // ignore
+        }
+      }
+    },
+    [isNative, win.height, win.width, win.x, win.y]
+  );
+
+  // Destroy native WebView for a tab
+  const destroyNativeTab = useCallback(
+    async (tabId: string) => {
+      if (!isNative || !createdWebViewsRef.current.has(tabId)) return;
+      createdWebViewsRef.current.delete(tabId);
+      try {
+        await EmbeddedWebView.destroy({ id: tabId });
+      } catch {
+        // ignore
+      }
+    },
+    [isNative]
+  );
+
+  // Initial creation if launched directly onto a URL (e.g. Web App shortcut or link)
+  useEffect(() => {
+    if (!isNative) return;
+    const initTab = tabsRef.current[0];
+    if (initTab && initTab.url.startsWith('http')) {
+      const id = window.setTimeout(() => {
+        void ensureOrLoadNativeTab(initTab, initTab.url);
+      }, 30);
+      return () => window.clearTimeout(id);
+    }
+  }, [ensureOrLoadNativeTab, isNative]);
+
+  // Destroy all native WebViews when browser window closes
+  useEffect(() => {
+    const createdSet = createdWebViewsRef.current;
+    return () => {
+      if (rafSyncRef.current !== null) {
+        cancelAnimationFrame(rafSyncRef.current);
+      }
+      if (!isNative) return;
+      Array.from(createdSet).forEach((tabId) => {
+        void EmbeddedWebView.destroy({ id: tabId }).catch(() => {});
+      });
+      createdSet.clear();
+    };
+  }, [isNative]);
+
+  // Show/hide native WebViews cleanly when active tab, window focus, drag, minimize, or overlays change
+  useEffect(() => {
+    if (!isNative) return;
+
+    createdWebViewsRef.current.forEach((tabId) => {
+      if (tabId !== activeTab.id || !shouldShowNative) {
+        void EmbeddedWebView.hide({ id: tabId }).catch(() => {});
+      }
+    });
+
+    if (shouldShowNative && activeTab.url.startsWith('http')) {
+      if (!createdWebViewsRef.current.has(activeTab.id)) {
+        void ensureOrLoadNativeTab(activeTab, activeTab.url);
+      } else {
+        syncBoundsNow();
+        void EmbeddedWebView.show({ id: activeTab.id }).catch(() => {});
+      }
+    }
+  }, [
+    activeTab,
+    ensureOrLoadNativeTab,
+    isNative,
+    shouldShowNative,
+    syncBoundsNow,
+  ]);
+
+  // Observe placeholder div resizing, window moves, scroll events, and resolution scale changes
+  useEffect(() => {
+    if (!isNative) return;
+    const el = viewportRef.current;
+    const ro = el ? new ResizeObserver(() => scheduleSyncBounds()) : null;
+    if (el && ro) ro.observe(el);
+
+    window.addEventListener('resize', scheduleSyncBounds);
+    window.addEventListener('scroll', scheduleSyncBounds, true);
+
+    return () => {
+      ro?.disconnect();
+      window.removeEventListener('resize', scheduleSyncBounds);
+      window.removeEventListener('scroll', scheduleSyncBounds, true);
+    };
+  }, [isNative, scheduleSyncBounds, activeTab.id]);
+
+  useEffect(() => {
+    if (shouldShowNative) {
+      scheduleSyncBounds();
+    }
+  }, [
+    shouldShowNative,
+    scheduleSyncBounds,
+    win.x,
+    win.y,
+    win.width,
+    win.height,
+    win.isMaximized,
+    settings.resolutionScale,
+    drawer,
+    findBarOpen,
+  ]);
+
+  // Open URL in a new tab inside the SAME browser window
+  const openUrlInNewTab = useCallback(
+    (url: string, incognito = false) => {
+      const newId = makeTabId();
+      const normalized = normalizeAddressInput(url, searchEngine);
+      const meta = normalized.startsWith('http') ? getSiteMeta(normalized) : null;
+      const title =
+        normalized === 'edge://home' ? 'New tab' : meta?.siteName || normalized;
+      const newTab: Tab = {
+        id: newId,
+        title,
+        url: normalized,
+        incognito,
+        desktopMode: false,
+        zoom: 100,
+        progress: normalized.startsWith('http') ? 15 : 0,
+        isLoading: normalized.startsWith('http'),
+        canGoBack: false,
+        canGoForward: false,
+        nativeCreated: false,
+        historyStack: [normalized],
+        historyIndex: 0,
+      };
+      setTabs((prev) => [...prev, newTab]);
+      setActiveTabId(newId);
+      setAddressInput(normalized);
+
+      if (normalized.startsWith('http') && !incognito) {
+        setHistoryList((prev) => [
+          { id: `h-${Date.now()}`, title, url: normalized, visitedAt: Date.now() },
+          ...prev,
+        ]);
+      }
+
+      if (isNative && normalized.startsWith('http')) {
+        window.setTimeout(() => {
+          void ensureOrLoadNativeTab(newTab, normalized);
+        }, 20);
+      }
+    },
+    [ensureOrLoadNativeTab, isNative, makeTabId, searchEngine]
+  );
+
+  const openUrlInNewTabRef = useRef(openUrlInNewTab);
+  openUrlInNewTabRef.current = openUrlInNewTab;
+
+  // Register EmbeddedWebView native event listeners
+  useEffect(() => {
+    if (!isNative) return;
+    let active = true;
+    const handles: PluginListenerHandle[] = [];
+
+    const ownsTab = (tabId: string) => tabsRef.current.some((t) => t.id === tabId);
+
+    (async () => {
+      handles.push(
+        await EmbeddedWebView.addListener('urlChanged', (ev) => {
+          if (!active || !ownsTab(ev.id)) return;
+          setTabs((prev) =>
+            prev.map((t) =>
+              t.id === ev.id
+                ? {
+                    ...t,
+                    url: ev.url,
+                    canGoBack: ev.canGoBack ?? t.canGoBack,
+                    canGoForward: ev.canGoForward ?? t.canGoForward,
+                  }
+                : t
+            )
+          );
+          if (activeTabRef.current?.id === ev.id) {
+            setAddressInput(ev.url);
+          }
+        })
+      );
+
+      handles.push(
+        await EmbeddedWebView.addListener('titleChanged', (ev) => {
+          if (!active || !ownsTab(ev.id) || !ev.title) return;
+          setTabs((prev) =>
+            prev.map((t) => (t.id === ev.id ? { ...t, title: ev.title } : t))
+          );
+        })
+      );
+
+      handles.push(
+        await EmbeddedWebView.addListener('progressChanged', (ev) => {
+          if (!active || !ownsTab(ev.id)) return;
+          setTabs((prev) =>
+            prev.map((t) =>
+              t.id === ev.id
+                ? { ...t, progress: ev.progress, isLoading: ev.progress < 100 }
+                : t
+            )
+          );
+        })
+      );
+
+      handles.push(
+        await EmbeddedWebView.addListener('loadStarted', (ev) => {
+          if (!active || !ownsTab(ev.id)) return;
+          setTabs((prev) =>
+            prev.map((t) =>
+              t.id === ev.id ? { ...t, url: ev.url || t.url, isLoading: true, progress: 15 } : t
+            )
+          );
+          if (activeTabRef.current?.id === ev.id && ev.url) {
+            setAddressInput(ev.url);
+          }
+        })
+      );
+
+      handles.push(
+        await EmbeddedWebView.addListener('loadFinished', (ev) => {
+          if (!active || !ownsTab(ev.id)) return;
+          const targetTab = tabsRef.current.find((t) => t.id === ev.id);
+          const cleanTitle = ev.title || getSiteMeta(ev.url).siteName;
+          setTabs((prev) =>
+            prev.map((t) =>
+              t.id === ev.id
+                ? {
+                    ...t,
+                    url: ev.url || t.url,
+                    title: cleanTitle || t.title,
+                    isLoading: false,
+                    progress: 100,
+                    canGoBack: ev.canGoBack,
+                    canGoForward: ev.canGoForward,
+                  }
+                : t
+            )
+          );
+          if (activeTabRef.current?.id === ev.id && ev.url) {
+            setAddressInput(ev.url);
+          }
+          if (targetTab && !targetTab.incognito && ev.url && ev.url.startsWith('http')) {
+            setHistoryList((prev) => {
+              if (prev[0]?.url === ev.url) return prev;
+              return [
+                {
+                  id: `h-${Date.now()}`,
+                  title: cleanTitle || ev.url,
+                  url: ev.url,
+                  visitedAt: Date.now(),
+                },
+                ...prev,
+              ];
+            });
+          }
+        })
+      );
+
+      handles.push(
+        await EmbeddedWebView.addListener('faviconReceived', (ev) => {
+          if (!active || !ownsTab(ev.id) || !ev.favicon) return;
+          setTabs((prev) =>
+            prev.map((t) => (t.id === ev.id ? { ...t, favicon: ev.favicon } : t))
+          );
+        })
+      );
+
+      handles.push(
+        await EmbeddedWebView.addListener('downloadStarted', (ev) => {
+          if (!active || !ownsTab(ev.id)) return;
+          const item: BrowserDownloadItem = {
+            id: `dl-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+            filename: ev.filename,
+            url: ev.url,
+            mimeType: ev.mimeType,
+            contentLength: ev.contentLength,
+            timestamp: ev.timestamp || Date.now(),
+          };
+          setDownloads((prev) => [item, ...prev]);
+          addNotification('Microsoft Edge', 'Download started', `${ev.filename} saved to Android Downloads.`);
+        })
+      );
+
+      handles.push(
+        await EmbeddedWebView.addListener('newWindowRequested', (ev) => {
+          if (!active || !ownsTab(ev.id) || !ev.url) return;
+          const sourceTab = tabsRef.current.find((t) => t.id === ev.id);
+          openUrlInNewTabRef.current(ev.url, Boolean(sourceTab?.incognito));
+        })
+      );
+
+      handles.push(
+        await EmbeddedWebView.addListener('findResults', (ev) => {
+          if (!active || activeTabRef.current?.id !== ev.id) return;
+          setFindMatchInfo({
+            active: ev.numberOfMatches > 0 ? ev.activeMatchOrdinal + 1 : 0,
+            total: ev.numberOfMatches,
+          });
+        })
+      );
+    })();
+
+    return () => {
+      active = false;
+      handles.forEach((h) => {
+        void h.remove().catch(() => {});
+      });
+    };
+  }, [addNotification, isNative]);
+
+  // Sync address bar & non-native web iframe fallback on tab change
+  useEffect(() => {
+    setAddressInput(activeTab.url);
+    if (isNative) return;
+
+    if (!activeTab.url.startsWith('http')) {
+      setWebIframeStatus('idle');
+      return;
+    }
+    const meta = getSiteMeta(activeTab.url);
+    if (meta.isWebIframeBlocked) {
+      setWebIframeStatus('blocked');
+      return;
+    }
+    setWebIframeStatus('loading');
+    const timeoutId = window.setTimeout(() => {
+      setWebIframeStatus((prev) => (prev === 'loading' ? 'timeout' : prev));
+    }, IFRAME_LOAD_TIMEOUT_MS);
+    return () => window.clearTimeout(timeoutId);
+  }, [activeTab.id, activeTab.url, isNative, reloadTick]);
+
   const navigateTab = (rawInput: string) => {
     const trimmed = rawInput.trim();
     if (!trimmed) return;
-
-    const target = normalizeAddressInput(trimmed);
+    const target = normalizeAddressInput(trimmed, searchEngine);
     const meta = target.startsWith('http') ? getSiteMeta(target) : null;
-
     const title =
       target === 'edge://home'
         ? 'New tab'
         : meta?.siteName || target.replace(/^https?:\/\//, '').split('/')[0];
 
-    setTabs((prev) =>
-      prev.map((t) => {
-        if (t.id !== activeTab.id) return t;
-        const nextStack = [...t.historyStack.slice(0, t.historyIndex + 1), target];
-        return {
-          ...t,
-          title,
-          url: target,
-          historyStack: nextStack,
-          historyIndex: nextStack.length - 1,
-        };
-      })
-    );
+    const updatedTab: Tab = {
+      ...activeTab,
+      title,
+      url: target,
+      isLoading: target.startsWith('http'),
+      progress: target.startsWith('http') ? 15 : 0,
+      historyStack: [...activeTab.historyStack.slice(0, activeTab.historyIndex + 1), target],
+      historyIndex: activeTab.historyIndex + 1,
+    };
+
+    setTabs((prev) => prev.map((t) => (t.id === activeTab.id ? updatedTab : t)));
     setAddressInput(target);
 
-    if (target.startsWith('http')) {
+    if (target === 'edge://home') {
+      void destroyNativeTab(activeTab.id);
+      setWebIframeStatus('idle');
+      return;
+    }
+
+    if (!activeTab.incognito) {
       setHistoryList((prev) => [
         { id: `h-${Date.now()}`, title, url: target, visitedAt: Date.now() },
         ...prev,
       ]);
+    }
 
-      if (isNative) {
-        setPageStatus('native');
-        void openNativeWebView(target, title);
-      } else if (meta?.isBlocked) {
-        setPageStatus('blocked');
-        openInNewTab(target);
-      } else {
-        setPageStatus('loading');
-        setReloadTick((t) => t + 1);
-      }
+    if (isNative) {
+      void ensureOrLoadNativeTab(updatedTab, target);
+    } else if (meta?.isWebIframeBlocked) {
+      setWebIframeStatus('blocked');
+      window.open(target, '_blank', 'noopener,noreferrer');
     } else {
-      setPageStatus('idle');
+      setWebIframeStatus('loading');
+      setReloadTick((t) => t + 1);
     }
   };
 
-  const goBack = () => {
+  const handleBack = async () => {
+    if (isNative && createdWebViewsRef.current.has(activeTab.id)) {
+      const res = await EmbeddedWebView.goBack({ id: activeTab.id }).catch(() => ({ handled: false }));
+      if (res.handled) return;
+    }
     if (activeTab.historyIndex <= 0) return;
     const nextIdx = activeTab.historyIndex - 1;
-    const url = activeTab.historyStack[nextIdx];
-    const meta = url.startsWith('http') ? getSiteMeta(url) : null;
+    const prevUrl = activeTab.historyStack[nextIdx];
+    const meta = prevUrl.startsWith('http') ? getSiteMeta(prevUrl) : null;
     setTabs((prev) =>
       prev.map((t) =>
         t.id === activeTab.id
           ? {
               ...t,
-              url,
+              url: prevUrl,
               historyIndex: nextIdx,
-              title: url === 'edge://home' ? 'New tab' : meta?.siteName || url,
+              title: prevUrl === 'edge://home' ? 'New tab' : meta?.siteName || prevUrl,
+              canGoBack: nextIdx > 0,
+              canGoForward: nextIdx < t.historyStack.length - 1,
             }
           : t
       )
     );
+    if (prevUrl === 'edge://home') {
+      void destroyNativeTab(activeTab.id);
+    } else if (isNative) {
+      void ensureOrLoadNativeTab({ ...activeTab, url: prevUrl }, prevUrl);
+    }
   };
 
-  const goForward = () => {
+  const handleForward = async () => {
+    if (isNative && createdWebViewsRef.current.has(activeTab.id)) {
+      const res = await EmbeddedWebView.goForward({ id: activeTab.id }).catch(() => ({ handled: false }));
+      if (res.handled) return;
+    }
     if (activeTab.historyIndex >= activeTab.historyStack.length - 1) return;
     const nextIdx = activeTab.historyIndex + 1;
-    const url = activeTab.historyStack[nextIdx];
-    const meta = url.startsWith('http') ? getSiteMeta(url) : null;
+    const nextUrl = activeTab.historyStack[nextIdx];
+    const meta = nextUrl.startsWith('http') ? getSiteMeta(nextUrl) : null;
     setTabs((prev) =>
       prev.map((t) =>
         t.id === activeTab.id
           ? {
               ...t,
-              url,
+              url: nextUrl,
               historyIndex: nextIdx,
-              title: url === 'edge://home' ? 'New tab' : meta?.siteName || url,
+              title: nextUrl === 'edge://home' ? 'New tab' : meta?.siteName || nextUrl,
+              canGoBack: nextIdx > 0,
+              canGoForward: nextIdx < t.historyStack.length - 1,
             }
           : t
       )
     );
+    if (isNative && nextUrl.startsWith('http')) {
+      void ensureOrLoadNativeTab({ ...activeTab, url: nextUrl }, nextUrl);
+    }
   };
 
-  const addTab = () => {
-    const id = `tab-${Date.now()}`;
+  const handleReloadOrStop = () => {
+    if (!activeTab.url.startsWith('http')) return;
+    if (isNative && createdWebViewsRef.current.has(activeTab.id)) {
+      if (activeTab.isLoading) {
+        void EmbeddedWebView.stop({ id: activeTab.id });
+        setTabs((prev) =>
+          prev.map((t) => (t.id === activeTab.id ? { ...t, isLoading: false, progress: 0 } : t))
+        );
+      } else {
+        void EmbeddedWebView.reload({ id: activeTab.id });
+      }
+      return;
+    }
+    setReloadTick((t) => t + 1);
+  };
+
+  const addTab = (incognito = false) => {
+    const id = makeTabId();
     setTabs((prev) => [
       ...prev,
-      { id, title: 'New tab', url: 'edge://home', historyStack: ['edge://home'], historyIndex: 0 },
+      {
+        id,
+        title: incognito ? 'InPrivate tab' : 'New tab',
+        url: 'edge://home',
+        incognito,
+        desktopMode: false,
+        zoom: 100,
+        progress: 0,
+        isLoading: false,
+        canGoBack: false,
+        canGoForward: false,
+        nativeCreated: false,
+        historyStack: ['edge://home'],
+        historyIndex: 0,
+      },
     ]);
     setActiveTabId(id);
+    setMenuOpen(false);
   };
 
   const closeTab = (id: string) => {
+    void destroyNativeTab(id);
     if (tabs.length === 1) {
-      navigateTab('edge://home');
+      const resetId = makeTabId();
+      setTabs([
+        {
+          id: resetId,
+          title: 'New tab',
+          url: 'edge://home',
+          incognito: false,
+          desktopMode: false,
+          zoom: 100,
+          progress: 0,
+          isLoading: false,
+          canGoBack: false,
+          canGoForward: false,
+          nativeCreated: false,
+          historyStack: ['edge://home'],
+          historyIndex: 0,
+        },
+      ]);
+      setActiveTabId(resetId);
       return;
     }
     const idx = tabs.findIndex((t) => t.id === id);
@@ -480,6 +910,48 @@ export const EdgeBrowser: React.FC<{
     setTabs(next);
     if (activeTabId === id) {
       setActiveTabId(next[Math.max(0, idx - 1)].id);
+    }
+  };
+
+  const toggleDesktopMode = () => {
+    const nextEnabled = !activeTab.desktopMode;
+    setTabs((prev) =>
+      prev.map((t) => (t.id === activeTab.id ? { ...t, desktopMode: nextEnabled } : t))
+    );
+    if (isNative && createdWebViewsRef.current.has(activeTab.id)) {
+      void EmbeddedWebView.setDesktopMode({ id: activeTab.id, enabled: nextEnabled });
+    }
+  };
+
+  const adjustZoom = (delta: number) => {
+    const nextZoom = Math.max(50, Math.min(200, activeTab.zoom + delta));
+    setTabs((prev) =>
+      prev.map((t) => (t.id === activeTab.id ? { ...t, zoom: nextZoom } : t))
+    );
+    if (isNative && createdWebViewsRef.current.has(activeTab.id)) {
+      void EmbeddedWebView.setZoom({ id: activeTab.id, zoom: nextZoom });
+    }
+  };
+
+  const runFind = (query: string, forward = true) => {
+    if (!isNative || !createdWebViewsRef.current.has(activeTab.id)) return;
+    void EmbeddedWebView.findInPage({
+      id: activeTab.id,
+      query,
+      forward,
+      clear: !query,
+    });
+    if (!query) {
+      setFindMatchInfo({ active: 0, total: 0 });
+    }
+  };
+
+  const closeFindBar = () => {
+    setFindBarOpen(false);
+    setFindQuery('');
+    setFindMatchInfo({ active: 0, total: 0 });
+    if (isNative && createdWebViewsRef.current.has(activeTab.id)) {
+      void EmbeddedWebView.findInPage({ id: activeTab.id, query: '', clear: true });
     }
   };
 
@@ -496,48 +968,79 @@ export const EdgeBrowser: React.FC<{
     }
   };
 
-  const renderEmbedBlockedPage = (url: string, reason: 'blocked' | 'timeout') => {
+  const handleCopyOrShare = async (mode: 'copy' | 'share') => {
+    const targetUrl = activeTab.url;
+    setMenuOpen(false);
+    if (!targetUrl.startsWith('http')) return;
+    if (mode === 'share' && navigator.share) {
+      try {
+        await navigator.share({ title: activeTab.title, url: targetUrl });
+        return;
+      } catch {
+        // fallback to copy
+      }
+    }
+    try {
+      await navigator.clipboard.writeText(targetUrl);
+      setCopiedToast(true);
+      setTimeout(() => setCopiedToast(false), 1800);
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleClearCookiesAndCache = async () => {
+    setMenuOpen(false);
+    setHistoryList([]);
+    setDownloads([]);
+    if (isNative) {
+      try {
+        await EmbeddedWebView.clearData();
+      } catch {
+        // ignore
+      }
+    }
+    addNotification('Microsoft Edge', 'Browsing data cleared', 'Cookies, cache, downloads list, and history cleared.');
+  };
+
+  const filteredHistory = useMemo(() => {
+    const q = historySearch.trim().toLowerCase();
+    if (!q) return historyList;
+    return historyList.filter(
+      (h) => h.title.toLowerCase().includes(q) || h.url.toLowerCase().includes(q)
+    );
+  }, [historyList, historySearch]);
+
+  const renderWebPreviewFallback = (url: string, reason: 'blocked' | 'timeout') => {
     const meta = getSiteMeta(url);
     return (
       <div className="h-full overflow-y-auto bg-gradient-to-b from-neutral-50 to-neutral-100 dark:from-[#1b1b1c] dark:to-[#141414] flex items-center justify-center p-6">
-        <div className="w-full max-w-md bg-white dark:bg-[#232325] border border-neutral-200 dark:border-neutral-700 shadow-lg p-7 text-center space-y-5">
-          <div className="w-14 h-14 mx-auto rounded-full bg-sky-500/10 text-[#0078D7] flex items-center justify-center">
-            <ShieldAlert className="w-7 h-7" />
+        <div className="w-full max-w-md bg-white dark:bg-[#232325] border border-neutral-200 dark:border-neutral-700 shadow-lg p-6 text-center space-y-4">
+          <div className="w-12 h-12 mx-auto rounded-full bg-sky-500/10 text-[#0078D7] flex items-center justify-center">
+            <ShieldAlert className="w-6 h-6" />
           </div>
-
-          <div className="space-y-1.5">
-            <div className="text-xl font-semibold text-neutral-900 dark:text-white">
-              {meta.siteName}
-            </div>
-            <div className="text-xs font-mono text-neutral-500 dark:text-neutral-400 truncate px-2">
-              {meta.hostname}
-            </div>
+          <div>
+            <div className="text-lg font-semibold text-neutral-900 dark:text-white">{meta.siteName}</div>
+            <div className="text-xs font-mono text-neutral-500 dark:text-neutral-400 truncate">{meta.hostname}</div>
           </div>
-
-          <div className="p-3 bg-neutral-100 dark:bg-neutral-800/80 border border-neutral-200 dark:border-neutral-700 text-xs text-neutral-700 dark:text-neutral-200 space-y-1">
-            <div className="font-medium text-neutral-900 dark:text-white">
-              This site does not allow embedding
-            </div>
-            <p className="text-[11px] text-neutral-500 dark:text-neutral-400">
-              {reason === 'timeout'
-                ? 'The page took too long to respond inside an embedded frame or blocked frame display.'
-                : 'In a web browser this site prevents iframe embedding. Package as an Android APK or open it in a new browser tab.'}
-            </p>
+          <div className="p-3 bg-neutral-100 dark:bg-neutral-800/80 border border-neutral-200 dark:border-neutral-700 text-xs text-neutral-600 dark:text-neutral-300">
+            {reason === 'timeout'
+              ? 'This page blocked embedded display in web preview. Open it in a new browser tab, or install the Android APK for full embedded WebView browsing.'
+              : 'Web browser security blocks iframe embedding for this site in web preview. In the Android APK it loads directly inside this window.'}
           </div>
-
-          <div className="flex flex-col sm:flex-row gap-2.5 pt-1">
+          <div className="flex gap-2">
             <button
-              onClick={() => openInNewTab(url)}
-              className="flex-1 inline-flex items-center justify-center gap-2 px-5 py-3 bg-[#0078D7] hover:bg-[#106EBE] text-white text-sm font-medium shadow-sm cursor-pointer transition-colors"
+              onClick={() => window.open(url, '_blank', 'noopener,noreferrer')}
+              className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-[#0078D7] hover:bg-[#106EBE] text-white text-xs font-medium cursor-pointer"
             >
               <span>Open in new tab</span>
-              <ExternalLink className="w-4 h-4" />
+              <ExternalLink className="w-3.5 h-3.5" />
             </button>
             <button
               onClick={() => navigateTab('edge://home')}
-              className="px-4 py-3 border border-neutral-300 dark:border-neutral-600 hover:bg-neutral-100 dark:hover:bg-neutral-800 text-xs font-medium cursor-pointer transition-colors"
+              className="px-3.5 py-2.5 border border-neutral-300 dark:border-neutral-600 text-xs cursor-pointer"
             >
-              New Tab Home
+              Home
             </button>
           </div>
         </div>
@@ -545,168 +1048,132 @@ export const EdgeBrowser: React.FC<{
     );
   };
 
-  const renderNativeTabCard = (url: string) => {
-    const meta = getSiteMeta(url);
-    return (
-      <div className="h-full overflow-y-auto bg-gradient-to-b from-sky-50 to-white dark:from-[#181b20] dark:to-[#121212] flex items-center justify-center p-6">
-        <div className="w-full max-w-md bg-white dark:bg-[#232325] border border-neutral-200 dark:border-neutral-700 shadow-lg p-6 text-center space-y-5">
-          <div className="w-14 h-14 mx-auto rounded-full bg-[#0078D7]/15 text-[#0078D7] flex items-center justify-center">
-            <Smartphone className="w-7 h-7" />
+  const renderNewTabHome = () => (
+    <div
+      className={`h-full overflow-y-auto p-5 sm:p-8 flex flex-col items-center ${
+        activeTab.incognito
+          ? 'bg-gradient-to-b from-[#1f222a] to-[#121318] text-white'
+          : 'bg-gradient-to-b from-sky-50 to-white dark:from-[#161a20] dark:to-[#121212]'
+      }`}
+    >
+      <div className="w-full max-w-2xl mt-2 sm:mt-6 space-y-6">
+        <div className="text-center space-y-1.5">
+          <div className="inline-flex items-center gap-2 text-xl sm:text-2xl font-light">
+            {activeTab.incognito ? (
+              <EyeOff className="w-6 h-6 text-sky-400" />
+            ) : (
+              <Globe className="w-6 h-6 text-[#0078D7]" />
+            )}
+            <span>{activeTab.incognito ? 'InPrivate Browsing' : 'Microsoft Edge'}</span>
           </div>
+          <p className="text-xs opacity-70">
+            {activeTab.incognito
+              ? 'Tabs in this session do not record Edge browsing history or cache.'
+              : isNative
+              ? 'Full embedded Android WebView — browse any website right inside this window.'
+              : `Search with ${searchEngine.charAt(0).toUpperCase() + searchEngine.slice(1)} or enter any URL.`}
+          </p>
+        </div>
 
-          <div className="space-y-1">
-            <div className="text-lg font-semibold text-neutral-900 dark:text-white">
-              {meta.siteName}
-            </div>
-            <div className="text-xs font-mono text-neutral-500 dark:text-neutral-400 break-all px-2">
-              {url}
-            </div>
-          </div>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            navigateTab(searchInput);
+            setSearchInput('');
+          }}
+          className="flex items-center bg-white dark:bg-neutral-800 border border-neutral-300 dark:border-neutral-700 shadow-md px-3.5 h-10 text-neutral-900 dark:text-white"
+        >
+          <Search className="w-4 h-4 text-neutral-400 mr-2.5 shrink-0" />
+          <input
+            type="text"
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
+            placeholder={`Search ${searchEngine.charAt(0).toUpperCase() + searchEngine.slice(1)} or enter web address...`}
+            className="flex-1 bg-transparent text-sm outline-none min-w-0"
+          />
+          <button
+            type="submit"
+            className="px-3.5 py-1 bg-[#0078D7] text-white text-xs font-medium hover:bg-[#106EBE] cursor-pointer shrink-0"
+          >
+            Go
+          </button>
+        </form>
 
-          <div className="p-3 bg-neutral-100 dark:bg-neutral-800/80 border border-neutral-200 dark:border-neutral-700 text-xs text-neutral-600 dark:text-neutral-300">
-            Running inside native Android WebView with persistent logins &amp; cookies.
-          </div>
-
-          <div className="flex flex-col gap-2.5">
-            <button
-              onClick={() => void openNativeWebView(url, meta.siteName)}
-              className="w-full inline-flex items-center justify-center gap-2 px-5 py-3 bg-[#0078D7] hover:bg-[#106EBE] text-white text-sm font-medium shadow-sm cursor-pointer transition-colors"
-            >
-              <Globe className="w-4 h-4" />
-              <span>Open Full-Screen Native Browser</span>
-            </button>
-
-            <div className="flex gap-2">
-              {nativeWebViewActive && (
-                <button
-                  onClick={() => void closeNativeWebView()}
-                  className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2.5 bg-neutral-200 dark:bg-neutral-800 hover:bg-neutral-300 dark:hover:bg-neutral-700 text-xs font-medium cursor-pointer"
+        <div>
+          <h3 className="text-xs font-semibold opacity-70 mb-2.5">Top Sites</h3>
+          <div className="grid grid-cols-3 sm:grid-cols-6 gap-2.5">
+            {NEW_TAB_SHORTCUTS.map((sc) => (
+              <button
+                key={sc.url}
+                onClick={() => navigateTab(sc.url)}
+                className="flex flex-col items-center gap-2 p-3 bg-white/90 dark:bg-neutral-800/80 border border-neutral-200 dark:border-neutral-700 hover:border-[#0078D7] transition-colors cursor-pointer"
+              >
+                <div
+                  style={{ backgroundColor: sc.color }}
+                  className="w-9 h-9 rounded-full text-white font-bold text-xs flex items-center justify-center shadow-sm"
                 >
-                  <X className="w-3.5 h-3.5" />
-                  <span>Close WebView</span>
-                </button>
-              )}
-              <button
-                onClick={() => {
-                  void closeNativeWebView();
-                  minimizeWindow(win.instanceId);
-                }}
-                className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2.5 border border-neutral-300 dark:border-neutral-600 hover:bg-neutral-100 dark:hover:bg-neutral-800 text-xs font-medium cursor-pointer"
-              >
-                <Minimize2 className="w-3.5 h-3.5" />
-                <span>Back to Desktop</span>
+                  {sc.badge}
+                </div>
+                <span className="text-[11px] font-medium truncate w-full text-center text-neutral-800 dark:text-neutral-100">
+                  {sc.name}
+                </span>
               </button>
-            </div>
+            ))}
           </div>
         </div>
-      </div>
-    );
-  };
 
-  const renderBody = () => {
-    if (activeTab.url === 'edge://home') {
-      return (
-        <div className="h-full overflow-y-auto bg-gradient-to-b from-sky-50 to-white dark:from-[#161a20] dark:to-[#121212] p-6 sm:p-10 flex flex-col items-center">
-          <div className="w-full max-w-2xl mt-2 sm:mt-8 space-y-7">
-            <div className="text-center space-y-2">
-              <div className="inline-flex items-center gap-2 text-2xl font-light text-neutral-800 dark:text-white">
-                <Globe className="w-7 h-7 text-[#0078D7]" />
-                <span>Microsoft Edge</span>
-              </div>
-              <p className="text-xs text-neutral-500 dark:text-neutral-400">
-                {isNative
-                  ? 'Android Native WebView active — open any website full screen with persistent logins'
-                  : 'Enter any web address (like wikipedia.org or facebook.com) or search with Google'}
-              </p>
-            </div>
-
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                navigateTab(searchInput);
-              }}
-              className="flex items-center bg-white dark:bg-neutral-800 border border-neutral-300 dark:border-neutral-700 shadow-md px-4 h-11"
-            >
-              <Search className="w-4 h-4 text-neutral-400 mr-3 shrink-0" />
-              <input
-                type="text"
-                value={searchInput}
-                onChange={(e) => setSearchInput(e.target.value)}
-                placeholder="Search Google or enter web address..."
-                className="flex-1 bg-transparent text-sm outline-none text-neutral-900 dark:text-white min-w-0"
-              />
-              <button
-                type="submit"
-                className="px-4 py-1.5 bg-[#0078D7] text-white text-xs font-medium hover:bg-[#106EBE] cursor-pointer shrink-0"
-              >
-                Search
-              </button>
-            </form>
-
-            <div>
-              <h3 className="text-xs font-semibold text-neutral-500 dark:text-neutral-400 mb-3">
-                Quick Links
-              </h3>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                {QUICK_LINKS.map((link) => (
-                  <button
-                    key={link.url}
-                    onClick={() => navigateTab(link.url)}
-                    className="p-3.5 bg-white dark:bg-neutral-800/80 border border-neutral-200 dark:border-neutral-700 hover:border-[#0078D7] text-left transition-colors cursor-pointer"
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-semibold text-neutral-900 dark:text-white">
-                        {link.name}
-                      </span>
-                      <Globe className="w-3.5 h-3.5 text-[#0078D7]" />
-                    </div>
-                    <div className="text-[11px] text-neutral-500 dark:text-neutral-400 mt-1 truncate">
-                      {link.desc}
-                    </div>
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div>
-              <h3 className="text-xs font-semibold text-neutral-500 dark:text-neutral-400 mb-2.5">
-                {isNative
-                  ? 'Popular Sites (Full-Screen Native WebView)'
-                  : 'Popular Sites (Opens in New Tab on Web / Native in APK)'}
-              </h3>
-              <div className="flex flex-wrap gap-2">
-                {POPULAR_SITES.map((site) => (
-                  <button
-                    key={site.url}
-                    onClick={() => navigateTab(site.url)}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white dark:bg-neutral-800/70 border border-neutral-200 dark:border-neutral-700 hover:border-[#0078D7] text-xs cursor-pointer transition-colors"
-                  >
-                    <span>{site.name}</span>
-                    <ExternalLink className="w-3 h-3 text-neutral-400" />
-                  </button>
-                ))}
-              </div>
+        {bookmarks.length > 0 && (
+          <div>
+            <h3 className="text-xs font-semibold opacity-70 mb-2">Bookmarks</h3>
+            <div className="flex flex-wrap gap-2">
+              {bookmarks.map((bm) => (
+                <button
+                  key={bm.id}
+                  onClick={() => navigateTab(bm.url)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white/90 dark:bg-neutral-800/75 border border-neutral-200 dark:border-neutral-700 hover:border-[#0078D7] text-xs text-neutral-800 dark:text-neutral-100 cursor-pointer"
+                >
+                  <Star className="w-3 h-3 text-amber-400 fill-amber-400" />
+                  <span className="truncate max-w-[140px]">{bm.title}</span>
+                </button>
+              ))}
             </div>
           </div>
+        )}
+      </div>
+    </div>
+  );
+
+  const renderViewport = () => {
+    if (activeTab.url === 'edge://home') {
+      return renderNewTabHome();
+    }
+
+    if (isNative) {
+      // Transparent placeholder; native Android EmbeddedWebView sits pixel-aligned right above this div
+      return (
+        <div
+          data-embedded-webview-placeholder={activeTab.id}
+          className="w-full h-full bg-transparent flex items-center justify-center"
+        >
+          {!shouldShowNative && (
+            <div className="text-xs text-neutral-500 dark:text-neutral-400 px-4 py-2 bg-white/80 dark:bg-neutral-900/80 border border-neutral-200 dark:border-neutral-700 shadow-sm">
+              {activeTab.title} · {activeTab.url}
+            </div>
+          )}
         </div>
       );
     }
 
-    if (pageStatus === 'native') {
-      return renderNativeTabCard(activeTab.url);
+    // Web preview fallback (non-native browser)
+    if (webIframeStatus === 'blocked') {
+      return renderWebPreviewFallback(activeTab.url, 'blocked');
     }
-
-    if (pageStatus === 'blocked') {
-      return renderEmbedBlockedPage(activeTab.url, 'blocked');
+    if (webIframeStatus === 'timeout') {
+      return renderWebPreviewFallback(activeTab.url, 'timeout');
     }
-
-    if (pageStatus === 'timeout') {
-      return renderEmbedBlockedPage(activeTab.url, 'timeout');
-    }
-
     return (
       <div className="relative w-full h-full flex flex-col bg-white">
-        {pageStatus === 'loading' && (
+        {webIframeStatus === 'loading' && (
           <div className="absolute top-0 left-0 right-0 h-1 bg-neutral-200 dark:bg-neutral-800 overflow-hidden z-10">
             <div className="h-full w-1/3 bg-[#0078D7] animate-pulse" />
           </div>
@@ -715,8 +1182,8 @@ export const EdgeBrowser: React.FC<{
           key={`${activeTab.id}-${activeTab.url}-${reloadTick}`}
           src={activeTab.url}
           title={activeTab.title}
-          onLoad={() => setPageStatus('loaded')}
-          onError={() => setPageStatus('timeout')}
+          onLoad={() => setWebIframeStatus('loaded')}
+          onError={() => setWebIframeStatus('timeout')}
           className="flex-1 w-full h-full border-0 bg-white"
           sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"
         />
@@ -725,23 +1192,35 @@ export const EdgeBrowser: React.FC<{
   };
 
   return (
-    <div className="flex flex-col h-full bg-neutral-100 dark:bg-[#202020] text-neutral-900 dark:text-neutral-100">
-      {/* Tab Strip (hidden in standalone PWA app mode unless user wants tabs) */}
+    <div className="flex flex-col h-full bg-neutral-100 dark:bg-[#202020] text-neutral-900 dark:text-neutral-100 relative">
+      {/* Tab Strip (hidden in standalone web-app mode) */}
       {!standaloneUrl && (
-        <div className="flex items-center gap-1 px-2 pt-1.5 bg-neutral-200 dark:bg-[#1a1a1a] border-b border-neutral-300 dark:border-neutral-800 overflow-x-auto">
+        <div
+          className={`flex items-center gap-1 px-2 pt-1 border-b overflow-x-auto no-scrollbar ${
+            activeTab.incognito
+              ? 'bg-[#171920] border-neutral-800'
+              : 'bg-neutral-200 dark:bg-[#1a1a1a] border-neutral-300 dark:border-neutral-800'
+          }`}
+        >
           {tabs.map((tab) => {
             const active = tab.id === activeTab.id;
             return (
               <div
                 key={tab.id}
                 onClick={() => setActiveTabId(tab.id)}
-                className={`group flex items-center gap-2 max-w-[190px] min-w-[110px] h-8 px-2.5 text-xs cursor-pointer transition-colors ${
+                className={`group flex items-center gap-1.5 max-w-[175px] min-w-[96px] h-7 px-2 text-[11.5px] cursor-pointer transition-colors ${
                   active
                     ? 'bg-neutral-100 dark:bg-[#2b2b2b] text-neutral-900 dark:text-white border-t-2 border-t-[#0078D7]'
                     : 'hover:bg-neutral-300/60 dark:hover:bg-white/5 text-neutral-600 dark:text-neutral-400'
                 }`}
               >
-                <Globe className="w-3.5 h-3.5 shrink-0 text-[#0078D7]" />
+                {tab.incognito ? (
+                  <EyeOff className="w-3.5 h-3.5 shrink-0 text-sky-400" />
+                ) : tab.favicon ? (
+                  <img src={tab.favicon} alt="" className="w-3.5 h-3.5 shrink-0 rounded-[2px]" />
+                ) : (
+                  <Globe className="w-3.5 h-3.5 shrink-0 text-[#0078D7]" />
+                )}
                 <span className="truncate flex-1">{tab.title}</span>
                 <button
                   onClick={(e) => {
@@ -757,53 +1236,51 @@ export const EdgeBrowser: React.FC<{
             );
           })}
           <button
-            onClick={addTab}
+            onClick={() => addTab(false)}
             className="w-7 h-7 flex items-center justify-center hover:bg-black/10 dark:hover:bg-white/10 shrink-0 cursor-pointer"
             title="New tab"
           >
             <Plus className="w-3.5 h-3.5" />
           </button>
+          <button
+            onClick={() => addTab(true)}
+            className="w-7 h-7 flex items-center justify-center hover:bg-black/10 dark:hover:bg-white/10 shrink-0 cursor-pointer"
+            title="New InPrivate tab"
+          >
+            <EyeOff className="w-3.5 h-3.5 opacity-75" />
+          </button>
         </div>
       )}
 
       {/* Navigation & Address Bar */}
-      <div className="flex items-center gap-1.5 px-2 py-1.5 bg-neutral-100 dark:bg-[#2b2b2b] border-b border-neutral-200 dark:border-neutral-800">
+      <div className="flex items-center gap-1 px-2 py-1 bg-neutral-100 dark:bg-[#2b2b2b] border-b border-neutral-200 dark:border-neutral-800 shrink-0">
         <button
-          onClick={goBack}
-          disabled={activeTab.historyIndex <= 0}
-          className="p-1.5 hover:bg-black/10 dark:hover:bg-white/10 disabled:opacity-35 cursor-pointer"
+          onClick={() => void handleBack()}
+          disabled={!activeTab.canGoBack && activeTab.historyIndex <= 0}
+          className="p-1.5 hover:bg-black/10 dark:hover:bg-white/10 disabled:opacity-35 cursor-pointer shrink-0"
           title="Back"
         >
-          <ArrowLeft className="w-4 h-4" />
+          <ArrowLeft className="w-3.5 h-3.5" />
         </button>
         <button
-          onClick={goForward}
-          disabled={activeTab.historyIndex >= activeTab.historyStack.length - 1}
-          className="p-1.5 hover:bg-black/10 dark:hover:bg-white/10 disabled:opacity-35 cursor-pointer"
+          onClick={() => void handleForward()}
+          disabled={!activeTab.canGoForward && activeTab.historyIndex >= activeTab.historyStack.length - 1}
+          className="p-1.5 hover:bg-black/10 dark:hover:bg-white/10 disabled:opacity-35 cursor-pointer shrink-0"
           title="Forward"
         >
-          <ArrowRight className="w-4 h-4" />
+          <ArrowRight className="w-3.5 h-3.5" />
         </button>
         <button
-          onClick={() => {
-            if (!activeTab.url.startsWith('http')) return;
-            if (isNative) {
-              void openNativeWebView(activeTab.url, activeTab.title);
-            } else if (getSiteMeta(activeTab.url).isBlocked) {
-              setPageStatus('blocked');
-            } else {
-              setReloadTick((t) => t + 1);
-            }
-          }}
-          className="p-1.5 hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer"
-          title="Reload"
+          onClick={handleReloadOrStop}
+          className="p-1.5 hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer shrink-0"
+          title={activeTab.isLoading ? 'Stop loading' : 'Reload'}
         >
-          <RotateCw className="w-3.5 h-3.5" />
+          {activeTab.isLoading ? <X className="w-3.5 h-3.5" /> : <RotateCw className="w-3.5 h-3.5" />}
         </button>
         {!standaloneUrl && (
           <button
             onClick={() => navigateTab('edge://home')}
-            className="p-1.5 hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer"
+            className="p-1.5 hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer shrink-0"
             title="Home"
           >
             <Home className="w-3.5 h-3.5" />
@@ -815,64 +1292,276 @@ export const EdgeBrowser: React.FC<{
             e.preventDefault();
             navigateTab(addressInput);
           }}
-          className="flex-1 flex items-center bg-white dark:bg-neutral-900 border border-neutral-300 dark:border-neutral-700 focus-within:border-[#0078D7] px-2.5 h-7 min-w-0"
+          className="flex-1 flex items-center bg-white dark:bg-neutral-900 border border-neutral-300 dark:border-neutral-700 focus-within:border-[#0078D7] px-2 h-7 min-w-0"
         >
+          {activeTab.incognito && (
+            <span className="px-1.5 py-0.5 mr-1.5 text-[9.5px] font-semibold bg-sky-600 text-white shrink-0">
+              InPrivate
+            </span>
+          )}
           <input
             type="text"
             value={addressInput}
             onChange={(e) => setAddressInput(e.target.value)}
+            onFocus={(e) => e.currentTarget.select()}
             className="w-full bg-transparent text-xs outline-none min-w-0"
-            placeholder="Search Google or enter web address (e.g. facebook.com)"
+            placeholder="Search or enter web address"
           />
           {activeTab.url.startsWith('http') && (
             <button
               type="button"
               onClick={toggleBookmark}
               className="p-1 text-neutral-400 hover:text-amber-500 cursor-pointer shrink-0"
-              title="Bookmark this page"
+              title={isBookmarked ? 'Remove bookmark' : 'Bookmark this page'}
             >
               <Star className={`w-3.5 h-3.5 ${isBookmarked ? 'fill-amber-400 text-amber-400' : ''}`} />
             </button>
           )}
         </form>
 
-        {activeTab.url.startsWith('http') && (
+        {/* Desktop Site Toggle */}
+        <button
+          onClick={toggleDesktopMode}
+          className={`p-1.5 cursor-pointer shrink-0 ${
+            activeTab.desktopMode
+              ? 'bg-[#0078D7] text-white'
+              : 'hover:bg-black/10 dark:hover:bg-white/10'
+          }`}
+          title={activeTab.desktopMode ? 'Desktop site: ON' : 'Desktop site: OFF (Mobile view)'}
+        >
+          {activeTab.desktopMode ? (
+            <Laptop className="w-3.5 h-3.5" />
+          ) : (
+            <Smartphone className="w-3.5 h-3.5" />
+          )}
+        </button>
+
+        {/* Find in Page Toggle */}
+        {activeTab.url.startsWith('http') && isNative && (
           <button
-            onClick={() =>
-              isNative
-                ? void openNativeWebView(activeTab.url, activeTab.title)
-                : openInNewTab(activeTab.url)
-            }
-            className="p-1.5 hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer shrink-0"
-            title={isNative ? 'Open full-screen WebView' : 'Open in new tab'}
+            onClick={() => {
+              if (findBarOpen) closeFindBar();
+              else setFindBarOpen(true);
+            }}
+            className={`p-1.5 hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer shrink-0 ${
+              findBarOpen ? 'bg-black/10 dark:bg-white/15' : ''
+            }`}
+            title="Find in page"
           >
-            <ExternalLink className="w-3.5 h-3.5" />
+            <Search className="w-3.5 h-3.5" />
           </button>
         )}
 
-        <button
-          onClick={() => setDrawer((d) => (d === 'bookmarks' ? null : 'bookmarks'))}
-          className={`p-1.5 hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer ${
-            drawer === 'bookmarks' ? 'bg-black/10 dark:bg-white/15' : ''
-          }`}
-          title="Favorites"
-        >
-          <Bookmark className="w-3.5 h-3.5" />
-        </button>
-        <button
-          onClick={() => setDrawer((d) => (d === 'history' ? null : 'history'))}
-          className={`p-1.5 hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer ${
-            drawer === 'history' ? 'bg-black/10 dark:bg-white/15' : ''
-          }`}
-          title="History"
-        >
-          <History className="w-3.5 h-3.5" />
-        </button>
+        {!standaloneUrl && (
+          <>
+            <button
+              onClick={() => setDrawer((d) => (d === 'bookmarks' ? null : 'bookmarks'))}
+              className={`p-1.5 hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer shrink-0 ${
+                drawer === 'bookmarks' ? 'bg-black/10 dark:bg-white/15' : ''
+              }`}
+              title="Bookmarks"
+            >
+              <Bookmark className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={() => setDrawer((d) => (d === 'history' ? null : 'history'))}
+              className={`p-1.5 hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer shrink-0 ${
+                drawer === 'history' ? 'bg-black/10 dark:bg-white/15' : ''
+              }`}
+              title="History"
+            >
+              <History className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={() => setDrawer((d) => (d === 'downloads' ? null : 'downloads'))}
+              className={`p-1.5 hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer shrink-0 ${
+                drawer === 'downloads' ? 'bg-black/10 dark:bg-white/15' : ''
+              }`}
+              title="Downloads"
+            >
+              <Download className="w-3.5 h-3.5" />
+            </button>
+          </>
+        )}
+
+        {/* More Menu */}
+        <div className="relative shrink-0">
+          <button
+            onClick={() => setMenuOpen((o) => !o)}
+            className={`p-1.5 hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer ${
+              menuOpen ? 'bg-black/10 dark:bg-white/15' : ''
+            }`}
+            title="Settings and more"
+          >
+            <MoreHorizontal className="w-3.5 h-3.5" />
+          </button>
+
+          {menuOpen && (
+            <div
+              onMouseDown={(e) => e.stopPropagation()}
+              className="absolute right-0 top-full mt-1 w-60 bg-white dark:bg-neutral-900 border border-neutral-300 dark:border-neutral-700 shadow-2xl z-50 py-1.5 text-xs"
+            >
+              <div className="px-3 py-1.5 flex items-center justify-between border-b border-neutral-200 dark:border-neutral-800">
+                <span className="font-medium">Zoom</span>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => adjustZoom(-15)}
+                    className="p-1 hover:bg-neutral-200 dark:hover:bg-neutral-800 cursor-pointer"
+                    title="Zoom out"
+                  >
+                    <ZoomOut className="w-3.5 h-3.5" />
+                  </button>
+                  <span className="w-10 text-center tabular-nums">{activeTab.zoom}%</span>
+                  <button
+                    onClick={() => adjustZoom(15)}
+                    className="p-1 hover:bg-neutral-200 dark:hover:bg-neutral-800 cursor-pointer"
+                    title="Zoom in"
+                  >
+                    <ZoomIn className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+
+              {!standaloneUrl && (
+                <>
+                  <button
+                    onClick={() => addTab(true)}
+                    className="w-full flex items-center gap-2.5 px-3 py-2 hover:bg-[#0078D7] hover:text-white cursor-pointer"
+                  >
+                    <EyeOff className="w-3.5 h-3.5" /> New InPrivate tab
+                  </button>
+                  {activeTab.url.startsWith('http') && (
+                    <button
+                      onClick={() => {
+                        setMenuOpen(false);
+                        openUrlInNewTab(activeTab.url, activeTab.incognito);
+                      }}
+                      className="w-full flex items-center gap-2.5 px-3 py-2 hover:bg-[#0078D7] hover:text-white cursor-pointer"
+                    >
+                      <ExternalLink className="w-3.5 h-3.5" /> Open link in new tab
+                    </button>
+                  )}
+                </>
+              )}
+
+              {activeTab.url.startsWith('http') && (
+                <>
+                  <button
+                    onClick={() => void handleCopyOrShare('copy')}
+                    className="w-full flex items-center gap-2.5 px-3 py-2 hover:bg-[#0078D7] hover:text-white cursor-pointer"
+                  >
+                    <Copy className="w-3.5 h-3.5" /> Copy link
+                  </button>
+                  <button
+                    onClick={() => void handleCopyOrShare('share')}
+                    className="w-full flex items-center gap-2.5 px-3 py-2 hover:bg-[#0078D7] hover:text-white cursor-pointer"
+                  >
+                    <Share2 className="w-3.5 h-3.5" /> Share link
+                  </button>
+                  <button
+                    onClick={() => {
+                      setMenuOpen(false);
+                      setInstallAppTitle(activeTab.title);
+                      setInstallAppModal(true);
+                    }}
+                    className="w-full flex items-center gap-2.5 px-3 py-2 hover:bg-[#0078D7] hover:text-white cursor-pointer"
+                  >
+                    <Plus className="w-3.5 h-3.5" /> Install site as Desktop app
+                  </button>
+                </>
+              )}
+
+              <div className="my-1 border-t border-neutral-200 dark:border-neutral-800" />
+              <div className="px-3 py-1.5 space-y-1">
+                <div className="text-[10.5px] text-neutral-500">Search engine</div>
+                <div className="grid grid-cols-3 gap-1">
+                  {(['google', 'bing', 'duckduckgo'] as SearchEngine[]).map((eng) => (
+                    <button
+                      key={eng}
+                      onClick={() => updateSettings({ searchEngine: eng })}
+                      className={`py-1 text-[10.5px] capitalize border cursor-pointer ${
+                        searchEngine === eng
+                          ? 'bg-[#0078D7] text-white border-[#0078D7]'
+                          : 'border-neutral-300 dark:border-neutral-700'
+                      }`}
+                    >
+                      {eng === 'duckduckgo' ? 'DDG' : eng}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="my-1 border-t border-neutral-200 dark:border-neutral-800" />
+              <button
+                onClick={() => void handleClearCookiesAndCache()}
+                className="w-full flex items-center gap-2.5 px-3 py-2 text-rose-600 dark:text-rose-400 hover:bg-rose-600 hover:text-white cursor-pointer"
+              >
+                <Trash2 className="w-3.5 h-3.5" /> Clear cookies &amp; cache
+              </button>
+            </div>
+          )}
+        </div>
       </div>
+
+      {/* Loading Progress Bar */}
+      {activeTab.url.startsWith('http') && activeTab.isLoading && (
+        <div className="h-[2.5px] w-full bg-neutral-200 dark:bg-neutral-800 shrink-0 overflow-hidden">
+          <div
+            style={{ width: `${Math.max(12, activeTab.progress)}%` }}
+            className="h-full bg-[#0078D7] transition-all duration-150"
+          />
+        </div>
+      )}
+
+      {/* Find in Page Bar */}
+      {findBarOpen && (
+        <div className="flex items-center gap-2 px-3 py-1.5 bg-neutral-100 dark:bg-neutral-900 border-b border-neutral-300 dark:border-neutral-700 text-xs shrink-0">
+          <Search className="w-3.5 h-3.5 text-neutral-400 shrink-0" />
+          <input
+            type="text"
+            autoFocus
+            value={findQuery}
+            onChange={(e) => {
+              setFindQuery(e.target.value);
+              runFind(e.target.value, true);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') runFind(findQuery, !e.shiftKey);
+              if (e.key === 'Escape') closeFindBar();
+            }}
+            placeholder="Find on page..."
+            className="flex-1 bg-white dark:bg-neutral-800 border border-neutral-300 dark:border-neutral-700 px-2 py-1 outline-none min-w-0"
+          />
+          <span className="text-[11px] tabular-nums text-neutral-500">
+            {findMatchInfo.total > 0 ? `${findMatchInfo.active}/${findMatchInfo.total}` : '0/0'}
+          </span>
+          <button
+            onClick={() => runFind(findQuery, false)}
+            className="p-1 hover:bg-neutral-200 dark:hover:bg-neutral-800 cursor-pointer"
+            title="Previous match"
+          >
+            <ArrowUp className="w-3.5 h-3.5" />
+          </button>
+          <button
+            onClick={() => runFind(findQuery, true)}
+            className="p-1 hover:bg-neutral-200 dark:hover:bg-neutral-800 cursor-pointer"
+            title="Next match"
+          >
+            <ArrowDown className="w-3.5 h-3.5" />
+          </button>
+          <button
+            onClick={closeFindBar}
+            className="p-1 hover:bg-neutral-200 dark:hover:bg-neutral-800 cursor-pointer"
+            title="Close find bar"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
 
       {/* Bookmarks Bar */}
       {!standaloneUrl && bookmarks.length > 0 && (
-        <div className="flex items-center gap-1 px-2 py-1 bg-neutral-100 dark:bg-[#252525] border-b border-neutral-200 dark:border-neutral-800 overflow-x-auto">
+        <div className="flex items-center gap-1 px-2 py-0.5 bg-neutral-100 dark:bg-[#252525] border-b border-neutral-200 dark:border-neutral-800 overflow-x-auto no-scrollbar shrink-0">
           {bookmarks.map((bm) => (
             <button
               key={bm.id}
@@ -885,13 +1574,23 @@ export const EdgeBrowser: React.FC<{
         </div>
       )}
 
-      {/* Main Content + Optional Favorites/History Side Drawer */}
-      <div className="flex-1 min-h-0 flex relative">
-        <div className="flex-1 min-w-0 h-full">{renderBody()}</div>
+      {/* Copied Toast */}
+      {copiedToast && (
+        <div className="absolute top-12 right-3 z-50 flex items-center gap-1.5 px-3 py-1.5 bg-neutral-900 text-white text-xs shadow-lg">
+          <Check className="w-3.5 h-3.5 text-emerald-400" />
+          <span>Link copied</span>
+        </div>
+      )}
+
+      {/* Page Area + Side Drawer */}
+      <div className="flex-1 min-h-0 flex relative overflow-hidden">
+        <div ref={viewportRef} className="flex-1 min-w-0 h-full relative">
+          {renderViewport()}
+        </div>
 
         {drawer && (
           <div className="w-64 shrink-0 border-l border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-900 flex flex-col">
-            <div className="p-3 border-b border-neutral-200 dark:border-neutral-800 flex items-center justify-between">
+            <div className="p-2.5 border-b border-neutral-200 dark:border-neutral-800 flex items-center justify-between">
               <span className="text-xs font-semibold capitalize">{drawer}</span>
               <div className="flex items-center gap-1">
                 {drawer === 'history' && historyList.length > 0 && (
@@ -903,14 +1602,39 @@ export const EdgeBrowser: React.FC<{
                     <Trash2 className="w-3.5 h-3.5" />
                   </button>
                 )}
+                {drawer === 'downloads' && downloads.length > 0 && (
+                  <button
+                    onClick={() => setDownloads([])}
+                    className="p-1 text-rose-500 hover:bg-rose-500/10 cursor-pointer"
+                    title="Clear downloads list"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                )}
                 <button onClick={() => setDrawer(null)} className="p-1 cursor-pointer" title="Close drawer">
                   <X className="w-3.5 h-3.5" />
                 </button>
               </div>
             </div>
+
+            {drawer === 'history' && (
+              <div className="p-2 border-b border-neutral-200 dark:border-neutral-800">
+                <input
+                  type="text"
+                  value={historySearch}
+                  onChange={(e) => setHistorySearch(e.target.value)}
+                  placeholder="Search history..."
+                  className="w-full px-2.5 py-1 text-xs bg-white dark:bg-neutral-800 border border-neutral-300 dark:border-neutral-700 outline-none"
+                />
+              </div>
+            )}
+
             <div className="flex-1 overflow-y-auto p-2 space-y-1">
-              {drawer === 'bookmarks'
-                ? bookmarks.map((bm) => (
+              {drawer === 'bookmarks' &&
+                (bookmarks.length === 0 ? (
+                  <p className="text-xs text-neutral-500 p-2">No bookmarks yet.</p>
+                ) : (
+                  bookmarks.map((bm) => (
                     <div
                       key={bm.id}
                       className="flex items-center justify-between gap-1 p-2 hover:bg-black/5 dark:hover:bg-white/5 text-xs"
@@ -930,7 +1654,13 @@ export const EdgeBrowser: React.FC<{
                       </button>
                     </div>
                   ))
-                : historyList.map((item) => (
+                ))}
+
+              {drawer === 'history' &&
+                (filteredHistory.length === 0 ? (
+                  <p className="text-xs text-neutral-500 p-2">No history items.</p>
+                ) : (
+                  filteredHistory.map((item) => (
                     <button
                       key={item.id}
                       onClick={() => navigateTab(item.url)}
@@ -939,11 +1669,73 @@ export const EdgeBrowser: React.FC<{
                       <div className="truncate font-medium">{item.title}</div>
                       <div className="truncate text-[10px] text-neutral-500">{item.url}</div>
                     </button>
-                  ))}
+                  ))
+                ))}
+
+              {drawer === 'downloads' &&
+                (downloads.length === 0 ? (
+                  <p className="text-xs text-neutral-500 p-2">
+                    Files downloaded in Edge are saved to your device Downloads folder and listed here.
+                  </p>
+                ) : (
+                  downloads.map((dl) => (
+                    <div
+                      key={dl.id}
+                      className="p-2 bg-white dark:bg-neutral-800/70 border border-neutral-200 dark:border-neutral-700 text-xs space-y-0.5"
+                    >
+                      <div className="font-medium truncate">{dl.filename}</div>
+                      <div className="text-[10px] text-neutral-500 truncate">
+                        {formatBytes(dl.contentLength)} · {new Date(dl.timestamp).toLocaleTimeString()}
+                      </div>
+                    </div>
+                  ))
+                ))}
             </div>
           </div>
         )}
       </div>
+
+      {/* Install Site as Desktop App Dialog */}
+      {installAppModal && (
+        <div
+          onMouseDown={(e) => e.stopPropagation()}
+          className="absolute inset-0 z-50 bg-black/50 flex items-center justify-center p-4"
+        >
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              installWebApp(installAppTitle || activeTab.title, activeTab.url, '#0078D7');
+              setInstallAppModal(false);
+            }}
+            className="w-full max-w-xs bg-white dark:bg-neutral-900 border border-neutral-300 dark:border-neutral-700 p-4 shadow-2xl space-y-3"
+          >
+            <div className="text-sm font-semibold">Install site as Desktop app</div>
+            <input
+              type="text"
+              autoFocus
+              value={installAppTitle}
+              onChange={(e) => setInstallAppTitle(e.target.value)}
+              placeholder="App title"
+              className="w-full px-3 py-1.5 text-xs bg-neutral-50 dark:bg-neutral-800 border border-neutral-300 dark:border-neutral-700 outline-none"
+            />
+            <div className="flex justify-end gap-2 text-xs">
+              <button
+                type="button"
+                onClick={() => setInstallAppModal(false)}
+                className="px-3 py-1.5 bg-neutral-200 dark:bg-neutral-800 cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="px-4 py-1.5 bg-[#0078D7] text-white cursor-pointer"
+              >
+                Install
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   );
 };

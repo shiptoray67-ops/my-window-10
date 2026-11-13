@@ -15,9 +15,17 @@ import {
   User,
   Grid,
 } from 'lucide-react';
+import { Capacitor } from '@capacitor/core';
 import { useOS } from '../../context/OSContext';
 import { ACCENT_COLORS, BUILTIN_APPS, STORE_GAMES, WALLPAPER_PRESETS } from '../../data/apps';
-import { DisplayOrientation, ResolutionScale, TaskbarPosition, WindowInstance } from '../../types/os';
+import { EmbeddedWebView } from '../../plugins/embeddedWebView';
+import {
+  DisplayOrientation,
+  ResolutionScale,
+  SearchEngine,
+  TaskbarPosition,
+  WindowInstance,
+} from '../../types/os';
 import { PWAInstallButton } from '../../utils/pwa';
 import { AppIcon } from '../icons/WinIcons';
 
@@ -29,6 +37,7 @@ type SettingsSection =
   | 'accounts'
   | 'time'
   | 'apps'
+  | 'browser'
   | 'update';
 
 export const SettingsApp: React.FC<{ win: WindowInstance }> = ({ win }) => {
@@ -51,6 +60,8 @@ export const SettingsApp: React.FC<{ win: WindowInstance }> = ({ win }) => {
   const [updateState, setUpdateState] = useState<'idle' | 'checking' | 'downloading' | 'uptodate'>('idle');
   const [updatePct, setUpdatePct] = useState(0);
   const [confirmReset, setConfirmReset] = useState(false);
+  const [browserClearedMsg, setBrowserClearedMsg] = useState('');
+  const [clearingBrowserData, setClearingBrowserData] = useState(false);
 
   const wallpaperInputRef = useRef<HTMLInputElement>(null);
   const avatarInputRef = useRef<HTMLInputElement>(null);
@@ -63,6 +74,7 @@ export const SettingsApp: React.FC<{ win: WindowInstance }> = ({ win }) => {
     { id: 'accounts', label: 'Accounts', icon: <User className="w-4 h-4" /> },
     { id: 'time', label: 'Time & Language', icon: <Clock className="w-4 h-4" /> },
     { id: 'apps', label: 'Apps', icon: <Grid className="w-4 h-4" /> },
+    { id: 'browser', label: 'Browser & Privacy', icon: <Globe className="w-4 h-4" /> },
     { id: 'update', label: 'Update & Security', icon: <RefreshCw className="w-4 h-4" /> },
   ];
 
@@ -719,6 +731,86 @@ export const SettingsApp: React.FC<{ win: WindowInstance }> = ({ win }) => {
                   <span className="text-[11px] text-neutral-400">System</span>
                 </div>
               ))}
+            </div>
+          </div>
+        )}
+
+        {section === 'browser' && (
+          <div className="max-w-xl space-y-6">
+            <h2 className="text-xl font-light">Browser &amp; Privacy</h2>
+
+            <div className="space-y-3 p-4 border border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-[#222222]">
+              <div>
+                <div className="text-xs font-semibold">Default search engine</div>
+                <div className="text-[11px] text-neutral-500 mt-0.5">
+                  Search engine used in the Microsoft Edge address bar and New Tab search box
+                </div>
+              </div>
+              <div className="grid grid-cols-3 gap-2 text-xs">
+                {(
+                  [
+                    { id: 'google', label: 'Google', desc: 'Default' },
+                    { id: 'bing', label: 'Bing', desc: 'Microsoft' },
+                    { id: 'duckduckgo', label: 'DuckDuckGo', desc: 'Private' },
+                  ] as Array<{ id: SearchEngine; label: string; desc: string }>
+                ).map((eng) => {
+                  const active = (settings.searchEngine || 'google') === eng.id;
+                  return (
+                    <button
+                      key={eng.id}
+                      onClick={() => updateSettings({ searchEngine: eng.id })}
+                      className={`p-2.5 border text-left transition-colors cursor-pointer ${
+                        active
+                          ? 'bg-[#0078D7] text-white border-[#0078D7]'
+                          : 'bg-white dark:bg-neutral-800 border-neutral-300 dark:border-neutral-700 hover:border-[#0078D7]'
+                      }`}
+                    >
+                      <div className="font-medium">{eng.label}</div>
+                      <div className={`text-[10px] mt-0.5 ${active ? 'text-white/85' : 'text-neutral-500'}`}>
+                        {eng.desc}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="space-y-3 p-4 border border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-[#222222] text-xs">
+              <div>
+                <div className="font-semibold">Cookies, cache &amp; browsing data</div>
+                <div className="text-[11px] text-neutral-500 mt-0.5">
+                  Clear saved cookies, website sessions, cached files, browsing history, and download records. Bookmarks are kept.
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-3 pt-1">
+                <button
+                  disabled={clearingBrowserData}
+                  onClick={async () => {
+                    setClearingBrowserData(true);
+                    try {
+                      if (Capacitor.isNativePlatform()) {
+                        await EmbeddedWebView.clearData();
+                      }
+                      localStorage.removeItem('win10_edge_history_v1');
+                      localStorage.removeItem('win10_edge_downloads_v1');
+                      setBrowserClearedMsg('Cookies, cache, history, and downloads cleared.');
+                      addNotification('Microsoft Edge', 'Browsing data cleared', 'Cookies, site data, cache, and history were removed.');
+                      setTimeout(() => setBrowserClearedMsg(''), 4000);
+                    } finally {
+                      setClearingBrowserData(false);
+                    }
+                  }}
+                  className="flex items-center gap-1.5 px-3.5 py-2 bg-[#0078D7] hover:bg-[#106EBE] disabled:opacity-50 text-white font-medium cursor-pointer"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  {clearingBrowserData ? 'Clearing...' : 'Clear cookies and cache'}
+                </button>
+                {browserClearedMsg && (
+                  <span className="text-emerald-600 dark:text-emerald-400 text-[11px]">
+                    {browserClearedMsg}
+                  </span>
+                )}
+              </div>
             </div>
           </div>
         )}

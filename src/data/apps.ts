@@ -401,4 +401,5 @@ export const DEFAULT_SETTINGS: SystemSettings = {
   showTouchpadPanel: false,
   orientation: 'landscape',
   resolutionScale: 100,
+  searchEngine: 'google',
 };

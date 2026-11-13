@@ -97,6 +97,11 @@ interface OSContextValue {
   setSnipOverlayOpen: (open: boolean) => void;
   snipCapturedImage: string | null;
   setSnipCapturedImage: (dataUrl: string | null) => void;
+  interactingWindowId: string | null;
+  setInteractingWindowId: (id: string | null) => void;
+  contextMenuOpen: boolean;
+  setContextMenuOpen: (open: boolean) => void;
+  hasShellOverlay: boolean;
   alarms: AlarmItem[];
   setAlarms: React.Dispatch<React.SetStateAction<AlarmItem[]>>;
   isMobile: boolean;
@@ -170,6 +175,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
   const [snipOverlayOpen, setSnipOverlayOpen] = useState(false);
   const [snipCapturedImage, setSnipCapturedImage] = useState<string | null>(null);
+  const [interactingWindowId, setInteractingWindowId] = useState<string | null>(null);
+  const [contextMenuOpen, setContextMenuOpen] = useState(false);
 
   const [alarms, setAlarms] = useState<AlarmItem[]>(() =>
     safeLoadArray(ALARMS_KEY, [
@@ -1049,6 +1056,15 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     closeAllOverlays,
   ]);
 
+  const hasShellOverlay =
+    powerPhase !== 'desktop' ||
+    startMenuOpen ||
+    actionCenterOpen ||
+    taskViewOpen ||
+    activeFlyout !== null ||
+    snipOverlayOpen ||
+    contextMenuOpen;
+
   const value = useMemo<OSContextValue>(
     () => ({
       powerPhase,
@@ -1114,6 +1130,11 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       setSnipOverlayOpen,
       snipCapturedImage,
       setSnipCapturedImage,
+      interactingWindowId,
+      setInteractingWindowId,
+      contextMenuOpen,
+      setContextMenuOpen,
+      hasShellOverlay,
       alarms,
       setAlarms,
       isMobile,
@@ -1175,6 +1196,9 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       unpinFromStart,
       snipOverlayOpen,
       snipCapturedImage,
+      interactingWindowId,
+      contextMenuOpen,
+      hasShellOverlay,
       alarms,
       isMobile,
       resetAllSimulatorData,

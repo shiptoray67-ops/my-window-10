@@ -34,6 +34,7 @@ export type PowerPhase = 'boot' | 'lock' | 'login' | 'desktop' | 'sleeping' | 'r
 export type TaskbarPosition = 'bottom' | 'top' | 'left' | 'right';
 export type DisplayOrientation = 'landscape' | 'auto';
 export type ResolutionScale = 75 | 100 | 125 | 150;
+export type SearchEngine = 'google' | 'bing' | 'duckduckgo';
 
 export interface AppDefinition {
   id: AppId;
@@ -134,6 +135,15 @@ export interface EdgeHistoryItem {
   visitedAt: number;
 }
 
+export interface BrowserDownloadItem {
+  id: string;
+  filename: string;
+  url: string;
+  mimeType: string;
+  contentLength: number;
+  timestamp: number;
+}
+
 export interface InstalledWebApp {
   id: `webapp-${string}`;
   title: string;
@@ -188,4 +198,5 @@ export interface SystemSettings {
   showTouchpadPanel: boolean;
   orientation: DisplayOrientation;
   resolutionScale: ResolutionScale;
+  searchEngine: SearchEngine;
 }

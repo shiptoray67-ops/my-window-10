@@ -31,6 +31,7 @@ export const Desktop: React.FC<{ children?: React.ReactNode }> = ({ children }) 
     getAppDefinition,
     uninstallStoreApp,
     uninstallWebApp,
+    setContextMenuOpen,
   } = useOS();
 
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -56,6 +57,11 @@ export const Desktop: React.FC<{ children?: React.ReactNode }> = ({ children }) 
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
   }, []);
+
+  useEffect(() => {
+    setContextMenuOpen(Boolean(contextMenu || newModal));
+    return () => setContextMenuOpen(false);
+  }, [contextMenu, newModal, setContextMenuOpen]);
 
   // Also show user-created VFS items inside Desktop folder
   const vfsDesktopItems = useMemo(() => {

@@ -25,6 +25,7 @@ export const WindowFrame: React.FC<WindowFrameProps> = ({ win, children }) => {
     isMobile,
     getAppDefinition,
     setTaskViewOpen,
+    setInteractingWindowId,
   } = useOS();
 
   const [snapGhost, setSnapGhost] = useState<'left' | 'right' | 'top' | null>(null);
@@ -137,6 +138,7 @@ export const WindowFrame: React.FC<WindowFrameProps> = ({ win, children }) => {
     }
 
     dragStateRef.current = { type: 'move', startX, startY, origX, origY, origW, origH };
+    setInteractingWindowId(win.instanceId);
 
     const onMouseMove = (ev: MouseEvent) => {
       if (!dragStateRef.current) return;
@@ -158,6 +160,7 @@ export const WindowFrame: React.FC<WindowFrameProps> = ({ win, children }) => {
       else if (ev.clientY <= 10) snapWindow(win.instanceId, 'top');
       setSnapGhost(null);
       dragStateRef.current = null;
+      setInteractingWindowId(null);
       window.removeEventListener('mousemove', onMouseMove);
       window.removeEventListener('mouseup', onMouseUp);
     };
@@ -182,6 +185,7 @@ export const WindowFrame: React.FC<WindowFrameProps> = ({ win, children }) => {
       origW: win.width,
       origH: win.height,
     };
+    setInteractingWindowId(win.instanceId);
 
     const onMouseMove = (ev: MouseEvent) => {
       const st = dragStateRef.current;
@@ -207,6 +211,7 @@ export const WindowFrame: React.FC<WindowFrameProps> = ({ win, children }) => {
 
     const onMouseUp = () => {
       dragStateRef.current = null;
+      setInteractingWindowId(null);
       window.removeEventListener('mousemove', onMouseMove);
       window.removeEventListener('mouseup', onMouseUp);
     };

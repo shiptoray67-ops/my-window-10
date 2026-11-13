@@ -3,6 +3,7 @@ package com.win10.simulator;
 import android.os.Build;
 import android.os.Bundle;
 import android.view.WindowManager;
+import androidx.activity.OnBackPressedCallback;
 import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.core.view.WindowInsetsControllerCompat;
@@ -11,8 +12,22 @@ import com.getcapacitor.BridgeActivity;
 public class MainActivity extends BridgeActivity {
   @Override
   protected void onCreate(Bundle savedInstanceState) {
+    registerPlugin(EmbeddedWebViewPlugin.class);
     super.onCreate(savedInstanceState);
     applyImmersiveAndKeepAwake();
+
+    getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
+      @Override
+      public void handleOnBackPressed() {
+        EmbeddedWebViewPlugin plugin = EmbeddedWebViewPlugin.getInstance();
+        if (plugin != null && plugin.handleBackPressed()) {
+          return;
+        }
+        setEnabled(false);
+        getOnBackPressedDispatcher().onBackPressed();
+        setEnabled(true);
+      }
+    });
   }
 
   @Override
@@ -23,7 +38,7 @@ public class MainActivity extends BridgeActivity {
     }
   }
 
-  private void applyImmersiveAndKeepAwake() {
+  public void applyImmersiveAndKeepAwake() {
     getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
     WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
 
