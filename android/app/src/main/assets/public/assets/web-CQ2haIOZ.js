@@ -1,0 +1,101 @@
+import { t as WebPlugin } from "./index-mQDRmoTM.js";
+// node_modules/@capgo/inappbrowser/dist/esm/web.js
+var InAppBrowserWeb = class extends WebPlugin {
+	clearAllCookies() {
+		console.log("clearAllCookies");
+		return Promise.resolve();
+	}
+	clearCache() {
+		console.log("clearCache");
+		return Promise.resolve();
+	}
+	async open(options) {
+		console.log("open", options);
+		return options;
+	}
+	async clearCookies(options) {
+		console.log("cleanCookies", options);
+	}
+	async getCookies(options) {
+		return options;
+	}
+	async openWebView(options) {
+		console.log("openWebView", options);
+		return options;
+	}
+	async executeScript({ code }) {
+		console.log("code", code);
+		return code;
+	}
+	async close(options) {
+		console.log("close", options);
+	}
+	async hide(options) {
+		console.log("hide", options);
+	}
+	async show(options) {
+		console.log("show", options);
+	}
+	async setUrl(options) {
+		console.log("setUrl", options.url);
+	}
+	async reload(options) {
+		console.log("reload", options);
+	}
+	async postMessage(options) {
+		console.log("postMessage", options);
+		return options;
+	}
+	async takeScreenshot(options) {
+		console.log("takeScreenshot not supported on web", options);
+		throw this.unimplemented("Screenshots are not supported on web.");
+	}
+	async goBack() {
+		console.log("goBack");
+	}
+	async getPluginVersion() {
+		return { version: "web" };
+	}
+	async updateDimensions(options) {
+		console.log("updateDimensions", options);
+	}
+	async handleProxyRequest(options) {
+		console.log("handleProxyRequest not supported on web", options);
+	}
+	async setEnabledSafeTopMargin(options) {
+		console.log("setEnabledSafeTopMargin not supported on web", options);
+	}
+	async setEnabledSafeBottomMargin(options) {
+		console.log("setEnabledSafeBottomMargin not supported on web", options);
+	}
+	async openSecureWindow(options) {
+		const w = 600;
+		const h = 550;
+		const settings = [
+			["width", w],
+			["height", h],
+			["left", screen.width / 2 - w / 2],
+			["top", screen.height / 2 - h / 2]
+		].map((x) => x.join("=")).join(",");
+		const popup = window.open(options.authEndpoint, "Authorization", settings);
+		if (!popup) throw new Error("Failed to open secure window");
+		if (typeof popup.focus === "function") popup.focus();
+		return new Promise((resolve, reject) => {
+			const bc = new BroadcastChannel(options.broadcastChannelName || "oauth-channel");
+			bc.addEventListener("message", (event) => {
+				if (event.data.startsWith(options.redirectUri)) {
+					bc.close();
+					resolve({ redirectedUri: event.data });
+				} else {
+					bc.close();
+					reject(/* @__PURE__ */ new Error("Redirect URI does not match, expected " + options.redirectUri + " but got " + event.data));
+				}
+			});
+			setTimeout(() => {
+				bc.close();
+				reject(/* @__PURE__ */ new Error("The sign-in flow timed out"));
+			}, 3e5);
+		});
+	}
+};
+export { InAppBrowserWeb };
