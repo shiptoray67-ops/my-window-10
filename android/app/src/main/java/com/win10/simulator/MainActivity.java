@@ -57,7 +57,7 @@ public class MainActivity extends BridgeActivity {
   }
 
   @Override
-  protected void onPause() {
+  public void onPause() {
     super.onPause();
     EmbeddedWebViewPlugin plugin = EmbeddedWebViewPlugin.getInstance();
     if (plugin != null) {
