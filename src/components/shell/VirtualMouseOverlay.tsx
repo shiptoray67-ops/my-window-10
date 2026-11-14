@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Capacitor } from '@capacitor/core';
+import { Capacitor, PluginListenerHandle } from '@capacitor/core';
 import { GripHorizontal, Minus, Plus, X } from 'lucide-react';
 import { useOS } from '../../context/OSContext';
 import { EmbeddedWebView, NativeCursorType } from '../../plugins/embeddedWebView';
@@ -9,6 +9,14 @@ const INTERACTIVE_SELECTOR =
 
 const TEXT_INPUT_SELECTOR =
   'input[type="text"], input[type="search"], input[type="url"], input[type="email"], input[type="password"], input:not([type]), textarea, [contenteditable="true"]';
+
+const TAP_MAX_DURATION_MS = 250;
+const TAP_MAX_MOVE_PX = 10;
+const DBL_TAP_MAX_DELAY_MS = 300;
+const DBL_TAP_MAX_DIST_PX = 30;
+const LONG_PRESS_DURATION_MS = 500;
+const WATCHDOG_TIMEOUT_MS = 2000;
+const JITTER_DEADZONE_PX = 1.4;
 
 function detectCursorType(rawEl: Element, interactiveEl: Element | null): NativeCursorType {
   const resizeEl = rawEl.closest('[data-resize-dir]');
@@ -35,6 +43,14 @@ function detectCursorType(rawEl: Element, interactiveEl: Element | null): Native
   return 'arrow';
 }
 
+function computeAccelerationFactor(stepDist: number, dtMs: number): number {
+  const velocity = stepDist / Math.max(8, Math.min(80, dtMs)); // px per ms
+  if (stepDist < 2.2 && velocity < 0.2) return 0.72; // micro-precision
+  if (velocity < 0.5) return 1.0;
+  if (velocity < 1.2) return 1.0 + (velocity - 0.5) * 0.7;
+  return Math.min(2.25, 1.49 + (velocity - 1.2) * 0.65);
+}
+
 export const VirtualMouseOverlay: React.FC = () => {
   const { settings, updateSettings, powerPhase } = useOS();
   const isNative = Capacitor.isNativePlatform();
@@ -52,6 +68,7 @@ export const VirtualMouseOverlay: React.FC = () => {
   const cursorPosRef = useRef(cursorPos);
   const targetPosRef = useRef(cursorPos);
   const rafIdRef = useRef<number | null>(null);
+  const moveInFlightRef = useRef(false);
   const activeDragButtonsRef = useRef(0);
   const lastCursorStyleRef = useRef<NativeCursorType>('arrow');
   const dragTargetWebViewIdRef = useRef<string | null>(null);
@@ -77,6 +94,30 @@ export const VirtualMouseOverlay: React.FC = () => {
   const hoveredInteractiveRef = useRef<Element | null>(null);
   const tooltipTimerRef = useRef<number | null>(null);
   const lastTouchTimeRef = useRef(0);
+  const watchdogTimerRef = useRef<number | null>(null);
+  const leftBtnHoldRef = useRef(false);
+  const lastTapInfoRef = useRef<{ time: number; x: number; y: number }>({ time: 0, x: 0, y: 0 });
+
+  const gestureRef = useRef<{
+    fingers: number;
+    maxFingers: number;
+    startX: number;
+    startY: number;
+    lastX: number;
+    lastY: number;
+    lastMoveTime: number;
+    lastDist: number;
+    totalMove: number;
+    startTime: number;
+    longPressTimer: number | null;
+    longPressFired: boolean;
+    draggingFromTapHold: boolean;
+    dragMouseDownSent: boolean;
+    twoFingerMoved: boolean;
+    threeFingerStart: number;
+    pendingDragCandidate: boolean;
+    directActionTarget: 'toggle' | 'reset' | null;
+  } | null>(null);
 
   const stopRaf = useCallback(() => {
     if (rafIdRef.current !== null) {
@@ -84,6 +125,134 @@ export const VirtualMouseOverlay: React.FC = () => {
       rafIdRef.current = null;
     }
   }, []);
+
+  const clearWatchdog = useCallback(() => {
+    if (watchdogTimerRef.current !== null) {
+      clearTimeout(watchdogTimerRef.current);
+      watchdogTimerRef.current = null;
+    }
+  }, []);
+
+  const clearLongPress = useCallback(() => {
+    if (gestureRef.current?.longPressTimer) {
+      clearTimeout(gestureRef.current.longPressTimer);
+      gestureRef.current.longPressTimer = null;
+    }
+  }, []);
+
+  const pushNativeMove = useCallback(
+    (x: number, y: number) => {
+      if (!isNative || moveInFlightRef.current) return;
+      moveInFlightRef.current = true;
+      void EmbeddedWebView.moveCursor({
+        x,
+        y,
+        devicePixelRatio: window.devicePixelRatio || 1,
+      })
+        .catch(() => {})
+        .finally(() => {
+          moveInFlightRef.current = false;
+        });
+    },
+    [isNative]
+  );
+
+  // Guaranteed cleanup of ALL active gesture / drag / hover / timer state on cancel, focus loss, or watchdog
+  const forceResetGestures = useCallback(
+    (reason?: string) => {
+      clearLongPress();
+      clearWatchdog();
+
+      const g = gestureRef.current;
+      const hadActiveDrag =
+        Boolean(g?.dragMouseDownSent) ||
+        leftBtnHoldRef.current ||
+        activeDragButtonsRef.current > 0 ||
+        Boolean(dragTargetWebViewIdRef.current);
+
+      gestureRef.current = null;
+      leftBtnHoldRef.current = false;
+      activeDragButtonsRef.current = 0;
+      setLeftBtnPressed(false);
+      setIsDraggingMouse(false);
+
+      if (hadActiveDrag) {
+        const { x, y } = cursorPosRef.current;
+        if (isNative && dragTargetWebViewIdRef.current) {
+          const targetId = dragTargetWebViewIdRef.current;
+          dragTargetWebViewIdRef.current = null;
+          void EmbeddedWebView.injectDrag({
+            id: targetId,
+            phase: 'cancel',
+            x,
+            y,
+            devicePixelRatio: window.devicePixelRatio || 1,
+          }).catch(() => {});
+        } else {
+          dragTargetWebViewIdRef.current = null;
+          const upInit: MouseEventInit = {
+            bubbles: true,
+            cancelable: true,
+            view: window,
+            clientX: x,
+            clientY: y,
+            button: 0,
+            buttons: 0,
+          };
+          window.dispatchEvent(new MouseEvent('mouseup', { ...upInit, bubbles: false }));
+          document.body.dispatchEvent(new MouseEvent('mouseup', upInit));
+        }
+      } else if (isNative && reason === 'blur') {
+        void EmbeddedWebView.injectDrag({
+          phase: 'cancel',
+          x: cursorPosRef.current.x,
+          y: cursorPosRef.current.y,
+          devicePixelRatio: window.devicePixelRatio || 1,
+        }).catch(() => {});
+      }
+    },
+    [clearLongPress, clearWatchdog, isNative]
+  );
+
+  const armWatchdog = useCallback(() => {
+    clearWatchdog();
+    watchdogTimerRef.current = window.setTimeout(() => {
+      watchdogTimerRef.current = null;
+      forceResetGestures('watchdog');
+    }, WATCHDOG_TIMEOUT_MS);
+  }, [clearWatchdog, forceResetGestures]);
+
+  const resetCursorToCenter = useCallback(() => {
+    forceResetGestures('reset');
+    stopRaf();
+    const vw = typeof window !== 'undefined' ? window.innerWidth : 1024;
+    const vh = typeof window !== 'undefined' ? window.innerHeight : 768;
+    const center = { x: Math.round(vw * 0.5), y: Math.round(vh * 0.5) };
+    cursorPosRef.current = center;
+    targetPosRef.current = center;
+    lastCursorStyleRef.current = 'arrow';
+    if (!isNative) {
+      setCursorPos(center);
+      setCursorStyle('arrow');
+      setClickPulse('left');
+      window.setTimeout(() => setClickPulse(null), 220);
+    } else {
+      void EmbeddedWebView.resetCursor({ devicePixelRatio: window.devicePixelRatio || 1 })
+        .then((pos) => {
+          if (pos && Number.isFinite(pos.x) && Number.isFinite(pos.y)) {
+            cursorPosRef.current = pos;
+            targetPosRef.current = pos;
+          }
+          void EmbeddedWebView.showClickFeedback({
+            kind: 'left',
+            x: cursorPosRef.current.x,
+            y: cursorPosRef.current.y,
+            devicePixelRatio: window.devicePixelRatio || 1,
+          }).catch(() => {});
+        })
+        .catch(() => {});
+    }
+  }, [forceResetGestures, isNative, stopRaf]);
 
   // Sync native cursor visibility & touch interceptor cleanly
   useEffect(() => {
@@ -94,8 +263,8 @@ export const VirtualMouseOverlay: React.FC = () => {
       const pw = Math.min(340, vw - 16);
       const ph = 186;
       const next = {
-        x: Math.max(16, Math.min(vw - 16, cursorPosRef.current.x || Math.round(vw * 0.5))),
-        y: Math.max(16, Math.min(vh - 16, cursorPosRef.current.y || Math.round(vh * 0.42))),
+        x: Math.max(8, Math.min(vw - 8, cursorPosRef.current.x || Math.round(vw * 0.5))),
+        y: Math.max(8, Math.min(vh - 8, cursorPosRef.current.y || Math.round(vh * 0.42))),
       };
       cursorPosRef.current = next;
       targetPosRef.current = next;
@@ -112,15 +281,24 @@ export const VirtualMouseOverlay: React.FC = () => {
           y: next.y,
           devicePixelRatio: window.devicePixelRatio || 1,
           type: lastCursorStyleRef.current,
-        }).catch(() => {});
+        })
+          .then((pos) => {
+            if (pos && Number.isFinite(pos.x) && Number.isFinite(pos.y)) {
+              cursorPosRef.current = pos;
+              targetPosRef.current = pos;
+            }
+          })
+          .catch(() => {});
       }
     } else if (isNative) {
+      forceResetGestures('disable');
       void EmbeddedWebView.setMouseModeTouchIntercept({ enabled: false }).catch(() => {});
       void EmbeddedWebView.hideCursor().catch(() => {});
     }
 
     return () => {
       stopRaf();
+      forceResetGestures('unmount');
       document.documentElement.classList.remove('vm-cursor-active');
       if (hoveredInteractiveRef.current) {
         hoveredInteractiveRef.current.removeAttribute('data-vm-hover');
@@ -136,12 +314,14 @@ export const VirtualMouseOverlay: React.FC = () => {
         void EmbeddedWebView.hideCursor().catch(() => {});
       }
     };
-  }, [isActive, isNative, stopRaf]);
+  }, [forceResetGestures, isActive, isNative, stopRaf]);
 
-  // Clamp cursor and optional panel on viewport resize
+  // Global reset, window close/minimize, focus loss, pointercancel, resize/orientation listeners
   useEffect(() => {
     if (!isActive) return;
-    const onResize = () => {
+
+    const onResizeOrOrientation = () => {
+      forceResetGestures('resize');
       const vw = window.innerWidth;
       const vh = window.innerHeight;
       const clamped = {
@@ -150,14 +330,8 @@ export const VirtualMouseOverlay: React.FC = () => {
       };
       targetPosRef.current = clamped;
       cursorPosRef.current = clamped;
-      setCursorPos(clamped);
-      if (isNative) {
-        void EmbeddedWebView.moveCursor({
-          x: clamped.x,
-          y: clamped.y,
-          devicePixelRatio: window.devicePixelRatio || 1,
-        }).catch(() => {});
-      }
+      if (!isNative) setCursorPos(clamped);
+      pushNativeMove(clamped.x, clamped.y);
 
       const pw = Math.min(340, vw - 16);
       setPanelPos((prev) => ({
@@ -165,9 +339,47 @@ export const VirtualMouseOverlay: React.FC = () => {
         y: Math.max(8, Math.min(vh - 190 - 54, prev.y)),
       }));
     };
-    window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
-  }, [isActive, isNative]);
+
+    const onBlurOrHidden = () => {
+      if (document.visibilityState === 'hidden' || !document.hasFocus()) {
+        forceResetGestures('blur');
+      }
+    };
+
+    const onPointerCancel = () => forceResetGestures('pointercancel');
+    const onResetEvent = () => resetCursorToCenter();
+    const onWinClosedOrMin = () => {
+      forceResetGestures('window-closed');
+    };
+
+    window.addEventListener('resize', onResizeOrOrientation);
+    window.addEventListener('orientationchange', onResizeOrOrientation);
+    window.addEventListener('blur', onBlurOrHidden);
+    document.addEventListener('visibilitychange', onBlurOrHidden);
+    window.addEventListener('pointercancel', onPointerCancel);
+    window.addEventListener('win10-reset-cursor', onResetEvent);
+    window.addEventListener('win10-window-closed-or-minimized', onWinClosedOrMin);
+
+    let nativeHandle: PluginListenerHandle | null = null;
+    if (isNative) {
+      void EmbeddedWebView.addListener('nativeResetGestures', () => {
+        forceResetGestures('native');
+      }).then((h) => {
+        nativeHandle = h;
+      });
+    }
+
+    return () => {
+      window.removeEventListener('resize', onResizeOrOrientation);
+      window.removeEventListener('orientationchange', onResizeOrOrientation);
+      window.removeEventListener('blur', onBlurOrHidden);
+      document.removeEventListener('visibilitychange', onBlurOrHidden);
+      window.removeEventListener('pointercancel', onPointerCancel);
+      window.removeEventListener('win10-reset-cursor', onResetEvent);
+      window.removeEventListener('win10-window-closed-or-minimized', onWinClosedOrMin);
+      void nativeHandle?.remove().catch(() => {});
+    };
+  }, [forceResetGestures, isActive, isNative, pushNativeMove, resetCursorToCenter]);
 
   const getHitElements = useCallback((x: number, y: number) => {
     const stack = document.elementsFromPoint(x, y);
@@ -192,13 +404,15 @@ export const VirtualMouseOverlay: React.FC = () => {
       const prevRaw = hoveredRawRef.current;
       const prevInt = hoveredInteractiveRef.current;
 
-      const nextStyle = detectCursorType(rawEl, interactiveEl);
-      if (nextStyle !== lastCursorStyleRef.current) {
-        lastCursorStyleRef.current = nextStyle;
-        if (!isNative) {
-          setCursorStyle(nextStyle);
-        } else {
-          void EmbeddedWebView.setCursorStyle({ type: nextStyle }).catch(() => {});
+      if (!nativeWebViewId) {
+        const nextStyle = detectCursorType(rawEl, interactiveEl);
+        if (nextStyle !== lastCursorStyleRef.current) {
+          lastCursorStyleRef.current = nextStyle;
+          if (!isNative) {
+            setCursorStyle(nextStyle);
+          } else {
+            void EmbeddedWebView.setCursorStyle({ type: nextStyle }).catch(() => {});
+          }
         }
       }
 
@@ -280,7 +494,7 @@ export const VirtualMouseOverlay: React.FC = () => {
         return;
       }
 
-      // Forward hover move to native WebView so CSS :hover effects work on web pages
+      // Forward hover move to native WebView so CSS :hover & link/text cursor shapes update
       if (isNative && nativeWebViewId && activeButtons === 0) {
         const now = performance.now();
         if (now - lastHoverSentRef.current >= 32) {
@@ -320,7 +534,7 @@ export const VirtualMouseOverlay: React.FC = () => {
     [getHitElements, isNative]
   );
 
-  // Smooth cursor glide via requestAnimationFrame
+  // Smooth RAF-coalesced cursor glide
   const stepCursorAnimation = useCallback(() => {
     const cur = cursorPosRef.current;
     const tgt = targetPosRef.current;
@@ -331,37 +545,31 @@ export const VirtualMouseOverlay: React.FC = () => {
     if (dist <= 0.35) {
       cursorPosRef.current = { x: tgt.x, y: tgt.y };
       if (!isNative) setCursorPos(cursorPosRef.current);
-      if (isNative) {
-        void EmbeddedWebView.moveCursor({
-          x: tgt.x,
-          y: tgt.y,
-          devicePixelRatio: window.devicePixelRatio || 1,
-        }).catch(() => {});
-      }
+      pushNativeMove(tgt.x, tgt.y);
       syncHoverAt(tgt.x, tgt.y, activeDragButtonsRef.current);
       rafIdRef.current = null;
       return;
     }
 
-    const smoothFactor = 0.5;
+    const smoothFactor = 0.55;
     const nx = cur.x + diffX * smoothFactor;
     const ny = cur.y + diffY * smoothFactor;
     cursorPosRef.current = { x: nx, y: ny };
     if (!isNative) setCursorPos(cursorPosRef.current);
-    if (isNative) {
-      void EmbeddedWebView.moveCursor({
-        x: nx,
-        y: ny,
-        devicePixelRatio: window.devicePixelRatio || 1,
-      }).catch(() => {});
-    }
+    pushNativeMove(nx, ny);
     syncHoverAt(nx, ny, activeDragButtonsRef.current);
     rafIdRef.current = requestAnimationFrame(stepCursorAnimation);
-  }, [isNative, syncHoverAt]);
+  }, [isNative, pushNativeMove, syncHoverAt]);
 
   const flushCursorToTarget = useCallback(() => {
     stopRaf();
-    const tgt = targetPosRef.current;
+    const vw = typeof window !== 'undefined' ? window.innerWidth : 1024;
+    const vh = typeof window !== 'undefined' ? window.innerHeight : 768;
+    const tgt = {
+      x: Math.max(0, Math.min(vw - 2, targetPosRef.current.x)),
+      y: Math.max(0, Math.min(vh - 2, targetPosRef.current.y)),
+    };
+    targetPosRef.current = tgt;
     cursorPosRef.current = tgt;
     if (!isNative) setCursorPos(tgt);
     if (isNative) {
@@ -375,13 +583,15 @@ export const VirtualMouseOverlay: React.FC = () => {
   }, [isNative, stopRaf]);
 
   const moveCursorBy = useCallback(
-    (dx: number, dy: number, activeButtons = 0) => {
+    (dx: number, dy: number, dtMs: number, activeButtons = 0) => {
       const vw = window.innerWidth;
       const vh = window.innerHeight;
+      const stepDist = Math.hypot(dx, dy);
+      const accel = computeAccelerationFactor(stepDist, dtMs);
       activeDragButtonsRef.current = activeButtons;
       targetPosRef.current = {
-        x: Math.max(0, Math.min(vw - 2, targetPosRef.current.x + dx * sensitivity)),
-        y: Math.max(0, Math.min(vh - 2, targetPosRef.current.y + dy * sensitivity)),
+        x: Math.max(0, Math.min(vw - 2, targetPosRef.current.x + dx * sensitivity * accel)),
+        y: Math.max(0, Math.min(vh - 2, targetPosRef.current.y + dy * sensitivity * accel)),
       };
       if (rafIdRef.current === null) {
         rafIdRef.current = requestAnimationFrame(stepCursorAnimation);
@@ -391,11 +601,22 @@ export const VirtualMouseOverlay: React.FC = () => {
     [sensitivity, stepCursorAnimation]
   );
 
-  const triggerPulse = useCallback((kind: 'left' | 'right') => {
-    if (isNative) return;
-    setClickPulse(kind);
-    window.setTimeout(() => setClickPulse(null), 220);
-  }, [isNative]);
+  const triggerPulse = useCallback(
+    (kind: 'left' | 'right', x: number, y: number) => {
+      if (isNative) {
+        void EmbeddedWebView.showClickFeedback({
+          kind,
+          x,
+          y,
+          devicePixelRatio: window.devicePixelRatio || 1,
+        }).catch(() => {});
+        return;
+      }
+      setClickPulse(kind);
+      window.setTimeout(() => setClickPulse(null), 220);
+    },
+    [isNative]
+  );
 
   const dispatchMouseDown = useCallback(
     (button: 0 | 2, detail = 1) => {
@@ -479,7 +700,7 @@ export const VirtualMouseOverlay: React.FC = () => {
           focusTarget.focus();
         }
       }
-      triggerPulse('left');
+      triggerPulse('left', x, y);
       syncHoverAt(x, y, 0);
     },
     [flushCursorToTarget, getHitElements, isNative, syncHoverAt, triggerPulse]
@@ -540,7 +761,7 @@ export const VirtualMouseOverlay: React.FC = () => {
     rawEl.dispatchEvent(new MouseEvent('mousedown', { ...init, buttons: 2 }));
     rawEl.dispatchEvent(new MouseEvent('mouseup', init));
     rawEl.dispatchEvent(new MouseEvent('contextmenu', init));
-    triggerPulse('right');
+    triggerPulse('right', x, y);
     syncHoverAt(x, y, 0);
   }, [flushCursorToTarget, getHitElements, isNative, syncHoverAt, triggerPulse]);
 
@@ -594,74 +815,111 @@ export const VirtualMouseOverlay: React.FC = () => {
     [getHitElements, isNative, sensitivity, syncHoverAt]
   );
 
-  // Gesture state refs shared by invisible full-screen touchpad or optional floating panel
-  const gestureRef = useRef<{
-    fingers: number;
-    startX: number;
-    startY: number;
-    lastX: number;
-    lastY: number;
-    lastDist: number;
-    totalMove: number;
-    startTime: number;
-    longPressTimer: number | null;
-    longPressFired: boolean;
-    draggingFromTapHold: boolean;
-    dragMouseDownSent: boolean;
-    twoFingerMoved: boolean;
-    pendingDragCandidate: boolean;
-    startedOnToggle: boolean;
-  } | null>(null);
-  const lastTapTimeRef = useRef(0);
-  const leftBtnHoldRef = useRef(false);
-
-  const clearLongPress = () => {
-    if (gestureRef.current?.longPressTimer) {
-      clearTimeout(gestureRef.current.longPressTimer);
-      gestureRef.current.longPressTimer = null;
-    }
+  const detectDirectActionTarget = (clientX: number, clientY: number): 'toggle' | 'reset' | null => {
+    const stack = document.elementsFromPoint(clientX, clientY);
+    if (stack.some((el) => Boolean(el.closest('[data-reset-cursor-btn="true"]')))) return 'reset';
+    if (stack.some((el) => Boolean(el.closest('[data-mouse-mode-toggle="true"]')))) return 'toggle';
+    return null;
   };
 
-  const isPointOnModeToggle = (clientX: number, clientY: number) => {
-    return document
-      .elementsFromPoint(clientX, clientY)
-      .some((el) => Boolean(el.closest('[data-mouse-mode-toggle="true"]')));
-  };
-
-  // Touchpad Touch Events
-  const handlePadTouchStart = (e: React.TouchEvent, checkDirectToggle: boolean) => {
+  // Hardened Multi-Touch Gesture State Machine
+  const handlePadTouchStart = (e: React.TouchEvent, checkDirectTray: boolean) => {
     e.stopPropagation();
     lastTouchTimeRef.current = Date.now();
     clearLongPress();
 
     const touches = e.targetTouches;
+    const now = Date.now();
+
+    if (touches.length >= 3) {
+      // Three fingers placed -> reset cursor candidate
+      forceResetGestures('3-finger-down');
+      gestureRef.current = {
+        fingers: touches.length,
+        maxFingers: touches.length,
+        startX: touches[0].clientX,
+        startY: touches[0].clientY,
+        lastX: touches[0].clientX,
+        lastY: touches[0].clientY,
+        lastMoveTime: now,
+        lastDist: 0,
+        totalMove: 0,
+        startTime: now,
+        longPressTimer: null,
+        longPressFired: false,
+        draggingFromTapHold: false,
+        dragMouseDownSent: false,
+        twoFingerMoved: false,
+        threeFingerStart: now,
+        pendingDragCandidate: false,
+        directActionTarget: null,
+      };
+      armWatchdog();
+      return;
+    }
+
+    if (touches.length === 2) {
+      // Transitioning 1 -> 2 fingers cleanly cancels any active 1-finger drag first
+      if (gestureRef.current?.dragMouseDownSent) {
+        forceResetGestures('1to2');
+      }
+      const cx = (touches[0].clientX + touches[1].clientX) / 2;
+      const cy = (touches[0].clientY + touches[1].clientY) / 2;
+      const dist = Math.hypot(touches[1].clientX - touches[0].clientX, touches[1].clientY - touches[0].clientY);
+      gestureRef.current = {
+        fingers: 2,
+        maxFingers: 2,
+        startX: cx,
+        startY: cy,
+        lastX: cx,
+        lastY: cy,
+        lastMoveTime: now,
+        lastDist: dist,
+        totalMove: 0,
+        startTime: now,
+        longPressTimer: null,
+        longPressFired: false,
+        draggingFromTapHold: false,
+        dragMouseDownSent: false,
+        twoFingerMoved: false,
+        threeFingerStart: 0,
+        pendingDragCandidate: false,
+        directActionTarget: null,
+      };
+      armWatchdog();
+      return;
+    }
+
     if (touches.length === 1) {
       const t = touches[0];
-      const now = Date.now();
-      const sinceLastTap = now - lastTapTimeRef.current;
-      const isSecondQuickTouch = sinceLastTap > 20 && sinceLastTap < 360;
-      const onToggle = checkDirectToggle && isPointOnModeToggle(t.clientX, t.clientY);
+      const sinceLastTap = now - lastTapInfoRef.current.time;
+      const isSecondQuickTouch = sinceLastTap > 20 && sinceLastTap <= DBL_TAP_MAX_DELAY_MS;
+      const directTarget = checkDirectTray ? detectDirectActionTarget(t.clientX, t.clientY) : null;
 
       const timer = window.setTimeout(() => {
         if (
           gestureRef.current &&
           gestureRef.current.fingers === 1 &&
-          gestureRef.current.totalMove < 8 &&
+          gestureRef.current.maxFingers === 1 &&
+          gestureRef.current.totalMove < TAP_MAX_MOVE_PX &&
           !gestureRef.current.draggingFromTapHold &&
           !leftBtnHoldRef.current &&
-          !gestureRef.current.startedOnToggle
+          !gestureRef.current.directActionTarget
         ) {
           gestureRef.current.longPressFired = true;
+          clearWatchdog();
           dispatchRightClick();
         }
-      }, 480);
+      }, LONG_PRESS_DURATION_MS);
 
       gestureRef.current = {
         fingers: 1,
+        maxFingers: 1,
         startX: t.clientX,
         startY: t.clientY,
         lastX: t.clientX,
         lastY: t.clientY,
+        lastMoveTime: now,
         lastDist: 0,
         totalMove: 0,
         startTime: now,
@@ -670,47 +928,39 @@ export const VirtualMouseOverlay: React.FC = () => {
         draggingFromTapHold: false,
         dragMouseDownSent: false,
         twoFingerMoved: false,
-        pendingDragCandidate: isSecondQuickTouch && !leftBtnHoldRef.current && !onToggle,
-        startedOnToggle: onToggle,
+        threeFingerStart: 0,
+        pendingDragCandidate: isSecondQuickTouch && !leftBtnHoldRef.current && !directTarget,
+        directActionTarget: directTarget,
       };
-    } else if (touches.length >= 2) {
-      const cx = (touches[0].clientX + touches[1].clientX) / 2;
-      const cy = (touches[0].clientY + touches[1].clientY) / 2;
-      const dist = Math.hypot(touches[1].clientX - touches[0].clientX, touches[1].clientY - touches[0].clientY);
-      gestureRef.current = {
-        fingers: 2,
-        startX: cx,
-        startY: cy,
-        lastX: cx,
-        lastY: cy,
-        lastDist: dist,
-        totalMove: 0,
-        startTime: Date.now(),
-        longPressTimer: null,
-        longPressFired: false,
-        draggingFromTapHold: false,
-        dragMouseDownSent: false,
-        twoFingerMoved: false,
-        pendingDragCandidate: false,
-        startedOnToggle: false,
-      };
+      armWatchdog();
     }
   };
 
   const handlePadTouchMove = (e: React.TouchEvent) => {
     e.stopPropagation();
-    lastTouchTimeRef.current = Date.now();
+    const now = Date.now();
+    lastTouchTimeRef.current = now;
     const g = gestureRef.current;
     if (!g) return;
 
     const touches = e.targetTouches;
-    if (touches.length >= 2) {
+    if (touches.length >= 3) {
+      g.maxFingers = Math.max(g.maxFingers, touches.length);
       clearLongPress();
+      armWatchdog();
+      return;
+    }
+
+    if (touches.length === 2) {
+      clearLongPress();
+      armWatchdog();
+      g.maxFingers = Math.max(g.maxFingers, 2);
       const cx = (touches[0].clientX + touches[1].clientX) / 2;
       const cy = (touches[0].clientY + touches[1].clientY) / 2;
       const dist = Math.hypot(touches[1].clientX - touches[0].clientX, touches[1].clientY - touches[0].clientY);
 
       if (g.fingers < 2) {
+        // Finger added (1 -> 2 transition): reset reference frame smoothly
         g.fingers = 2;
         g.startX = cx;
         g.startY = cy;
@@ -718,6 +968,7 @@ export const VirtualMouseOverlay: React.FC = () => {
         g.lastY = cy;
         g.lastDist = dist;
         g.totalMove = 0;
+        g.lastMoveTime = now;
         return;
       }
 
@@ -729,6 +980,7 @@ export const VirtualMouseOverlay: React.FC = () => {
       g.totalMove += Math.hypot(dx, dy) + Math.abs(dist - g.lastDist);
       g.lastX = cx;
       g.lastY = cy;
+      g.lastMoveTime = now;
       if (g.totalMove > 6) {
         g.twoFingerMoved = true;
       }
@@ -760,11 +1012,21 @@ export const VirtualMouseOverlay: React.FC = () => {
       const t = touches[0];
       const dx = t.clientX - g.lastX;
       const dy = t.clientY - g.lastY;
-      g.totalMove += Math.hypot(dx, dy);
+      const stepDist = Math.hypot(dx, dy);
+      const dtMs = now - g.lastMoveTime;
+
       g.lastX = t.clientX;
       g.lastY = t.clientY;
+      g.lastMoveTime = now;
 
-      if (g.totalMove > 6) {
+      // Micro-jitter deadzone when stationary
+      if (g.totalMove === 0 && stepDist < JITTER_DEADZONE_PX) {
+        return;
+      }
+
+      g.totalMove += stepDist;
+
+      if (g.totalMove >= TAP_MAX_MOVE_PX) {
         clearLongPress();
         if (g.pendingDragCandidate && !g.dragMouseDownSent) {
           g.draggingFromTapHold = true;
@@ -774,33 +1036,64 @@ export const VirtualMouseOverlay: React.FC = () => {
         }
       }
 
+      if (g.dragMouseDownSent || leftBtnHoldRef.current) {
+        armWatchdog();
+      }
+
       if (!g.longPressFired) {
         const activeBtns = g.dragMouseDownSent || leftBtnHoldRef.current ? 1 : 0;
-        moveCursorBy(dx, dy, activeBtns);
+        moveCursorBy(dx, dy, dtMs, activeBtns);
       }
+    } else if (touches.length === 1 && g.fingers >= 2) {
+      // Finger lifted during 2 -> 1 transition: re-anchor cleanly so cursor does NOT teleport
+      const t = touches[0];
+      g.fingers = 1;
+      g.lastX = t.clientX;
+      g.lastY = t.clientY;
+      g.lastMoveTime = now;
     }
   };
 
   const handlePadTouchEnd = (e: React.TouchEvent) => {
     e.stopPropagation();
-    lastTouchTimeRef.current = Date.now();
+    const now = Date.now();
+    lastTouchTimeRef.current = now;
     const g = gestureRef.current;
     if (!g) return;
     clearLongPress();
 
     const touches = e.targetTouches;
     if (touches.length > 0) {
-      if (g.fingers >= 2 && !g.twoFingerMoved && g.totalMove < 14 && Date.now() - g.startTime < 360) {
+      // Partial finger lift (e.g., 3->2 or 2->1)
+      if (g.maxFingers >= 3 && touches.length < 3) {
+        if (now - g.threeFingerStart < 450) {
+          resetCursorToCenter();
+        }
+        return;
+      }
+      if (g.fingers >= 2 && !g.twoFingerMoved && g.totalMove < 16 && now - g.startTime < 360) {
         dispatchRightClick();
         g.longPressFired = true;
       }
       const rem = touches[0];
+      g.fingers = touches.length;
       g.lastX = rem.clientX;
       g.lastY = rem.clientY;
+      g.lastMoveTime = now;
       return;
     }
 
-    const dur = Date.now() - g.startTime;
+    clearWatchdog();
+    const dur = now - g.startTime;
+
+    if (g.maxFingers >= 3) {
+      if (dur < 500) {
+        resetCursorToCenter();
+      } else {
+        gestureRef.current = null;
+      }
+      return;
+    }
 
     if (g.dragMouseDownSent) {
       setIsDraggingMouse(false);
@@ -814,35 +1107,49 @@ export const VirtualMouseOverlay: React.FC = () => {
       return;
     }
 
-    if (g.fingers >= 2) {
-      if (!g.longPressFired && !g.twoFingerMoved && g.totalMove < 14 && dur < 360) {
+    if (g.fingers >= 2 || g.maxFingers >= 2) {
+      if (!g.longPressFired && !g.twoFingerMoved && g.totalMove < 16 && dur < 360) {
         dispatchRightClick();
       }
       gestureRef.current = null;
       return;
     }
 
-    if (!g.longPressFired && g.totalMove < 8 && dur < 300) {
-      if (g.startedOnToggle) {
+    if (!g.longPressFired && g.totalMove < TAP_MAX_MOVE_PX && dur < TAP_MAX_DURATION_MS) {
+      if (g.directActionTarget === 'toggle') {
         updateSettings({ mouseMode: false });
         gestureRef.current = null;
         return;
       }
-      const now = Date.now();
-      const isDoubleTap = now - lastTapTimeRef.current < 360;
+      if (g.directActionTarget === 'reset') {
+        resetCursorToCenter();
+        return;
+      }
+
+      const { x, y } = cursorPosRef.current;
+      const distSinceLast = Math.hypot(x - lastTapInfoRef.current.x, y - lastTapInfoRef.current.y);
+      const isDoubleTap =
+        now - lastTapInfoRef.current.time <= DBL_TAP_MAX_DELAY_MS &&
+        distSinceLast <= DBL_TAP_MAX_DIST_PX;
+
       if (isDoubleTap) {
-        lastTapTimeRef.current = 0;
+        lastTapInfoRef.current = { time: 0, x: 0, y: 0 };
         dispatchLeftClick(2);
       } else {
-        lastTapTimeRef.current = now;
+        lastTapInfoRef.current = { time: now, x, y };
         dispatchLeftClick(1);
       }
     }
     gestureRef.current = null;
   };
 
-  // Mouse fallback (respects e.isTrusted so our own synthetic MouseEvents never re-enter)
-  const handlePadMouseDown = (e: React.MouseEvent, checkDirectToggle: boolean) => {
+  const handlePadTouchCancel = (e: React.TouchEvent) => {
+    e.stopPropagation();
+    forceResetGestures('touchcancel');
+  };
+
+  // Mouse fallback for desktop preview (ignores synthetic MouseEvents so clicks never loop)
+  const handlePadMouseDown = (e: React.MouseEvent, checkDirectTray: boolean) => {
     if (!e.nativeEvent.isTrusted) return;
     e.stopPropagation();
     if (Date.now() - lastTouchTimeRef.current < 500) return;
@@ -854,65 +1161,88 @@ export const VirtualMouseOverlay: React.FC = () => {
     if (e.button !== 0) return;
 
     const now = Date.now();
-    const isSecondQuickClick = now - lastTapTimeRef.current < 360;
-    const onToggle = checkDirectToggle && isPointOnModeToggle(e.clientX, e.clientY);
+    const { x: curX, y: curY } = cursorPosRef.current;
+    const isSecondQuickClick =
+      now - lastTapInfoRef.current.time <= DBL_TAP_MAX_DELAY_MS &&
+      Math.hypot(curX - lastTapInfoRef.current.x, curY - lastTapInfoRef.current.y) <= DBL_TAP_MAX_DIST_PX;
+    const directTarget = checkDirectTray ? detectDirectActionTarget(e.clientX, e.clientY) : null;
     const startX = e.clientX;
     const startY = e.clientY;
     let lastX = startX;
     let lastY = startY;
+    let lastTime = now;
     let totalMove = 0;
     let dragSent = false;
     let longFired = false;
 
     const lpTimer = window.setTimeout(() => {
-      if (totalMove < 6 && !dragSent && !onToggle) {
+      if (totalMove < TAP_MAX_MOVE_PX && !dragSent && !directTarget) {
         longFired = true;
         dispatchRightClick();
       }
-    }, 500);
+    }, LONG_PRESS_DURATION_MS);
 
     const onMove = (ev: MouseEvent) => {
       if (!ev.isTrusted) return;
+      const moveNow = Date.now();
       const dx = ev.clientX - lastX;
       const dy = ev.clientY - lastY;
-      totalMove += Math.hypot(dx, dy);
+      const dt = moveNow - lastTime;
       lastX = ev.clientX;
       lastY = ev.clientY;
+      lastTime = moveNow;
+      totalMove += Math.hypot(dx, dy);
 
-      if (totalMove > 5) {
+      if (totalMove >= TAP_MAX_MOVE_PX) {
         clearTimeout(lpTimer);
-        if (isSecondQuickClick && !dragSent && !onToggle) {
+        if (isSecondQuickClick && !dragSent && !directTarget) {
           dragSent = true;
           setIsDraggingMouse(true);
           dispatchMouseDown(0, 1);
         }
       }
       if (!longFired) {
-        moveCursorBy(dx, dy, dragSent || leftBtnHoldRef.current ? 1 : 0);
+        moveCursorBy(dx, dy, dt, dragSent || leftBtnHoldRef.current ? 1 : 0);
+      }
+    };
+
+    const cleanupMouseListeners = () => {
+      clearTimeout(lpTimer);
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      window.removeEventListener('blur', onCancel);
+    };
+
+    const onCancel = () => {
+      cleanupMouseListeners();
+      if (dragSent) {
+        forceResetGestures('mouse-cancel');
       }
     };
 
     const onUp = (ev: MouseEvent) => {
       if (!ev.isTrusted) return;
-      clearTimeout(lpTimer);
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
+      cleanupMouseListeners();
       if (dragSent) {
         setIsDraggingMouse(false);
         dispatchLeftUpAndClick(false);
         return;
       }
       const dur = Date.now() - now;
-      if (!longFired && totalMove < 6 && dur < 320) {
-        if (onToggle) {
+      if (!longFired && totalMove < TAP_MAX_MOVE_PX && dur < 320) {
+        if (directTarget === 'toggle') {
           updateSettings({ mouseMode: false });
           return;
         }
+        if (directTarget === 'reset') {
+          resetCursorToCenter();
+          return;
+        }
         if (isSecondQuickClick) {
-          lastTapTimeRef.current = 0;
+          lastTapInfoRef.current = { time: 0, x: 0, y: 0 };
           dispatchLeftClick(2);
         } else {
-          lastTapTimeRef.current = Date.now();
+          lastTapInfoRef.current = { time: Date.now(), x: cursorPosRef.current.x, y: cursorPosRef.current.y };
           dispatchLeftClick(1);
         }
       }
@@ -920,6 +1250,7 @@ export const VirtualMouseOverlay: React.FC = () => {
 
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
+    window.addEventListener('blur', onCancel);
   };
 
   // Draggable Optional Touchpad Panel Handle
@@ -969,11 +1300,13 @@ export const VirtualMouseOverlay: React.FC = () => {
     leftBtnHoldRef.current = true;
     setLeftBtnPressed(true);
     setIsDraggingMouse(true);
+    armWatchdog();
     const now = Date.now();
-    const isDbl = now - lastLeftBtnClickRef.current < 340;
+    const isDbl = now - lastLeftBtnClickRef.current < DBL_TAP_MAX_DELAY_MS;
     dispatchMouseDown(0, isDbl ? 2 : 1);
 
     const release = () => {
+      clearWatchdog();
       if (!leftBtnHoldRef.current) return;
       leftBtnHoldRef.current = false;
       setLeftBtnPressed(false);
@@ -1004,7 +1337,8 @@ export const VirtualMouseOverlay: React.FC = () => {
           onTouchStart={(e) => handlePadTouchStart(e, true)}
           onTouchMove={handlePadTouchMove}
           onTouchEnd={handlePadTouchEnd}
-          onTouchCancel={handlePadTouchEnd}
+          onTouchCancel={handlePadTouchCancel}
+          onPointerCancel={() => forceResetGestures('pointercancel')}
           onMouseDown={(e) => handlePadMouseDown(e, true)}
           onContextMenu={(e) => {
             if (e.nativeEvent.isTrusted) {
@@ -1186,14 +1520,14 @@ export const VirtualMouseOverlay: React.FC = () => {
             onTouchStart={(e) => handlePadTouchStart(e, false)}
             onTouchMove={handlePadTouchMove}
             onTouchEnd={handlePadTouchEnd}
-            onTouchCancel={handlePadTouchEnd}
+            onTouchCancel={handlePadTouchCancel}
             onMouseDown={(e) => handlePadMouseDown(e, false)}
             className="h-28 w-full touch-none relative flex flex-col items-center justify-center bg-gradient-to-b from-white/[0.04] to-black/25 active:bg-white/[0.07] cursor-crosshair"
           >
             <span className="text-[10px] text-neutral-400 pointer-events-none text-center px-3 leading-snug">
               Slide to move · Tap = Click · 2x Tap = Double Click
               <br />
-              Tap-hold &amp; drag = Drag/Select · 2-finger/Hold = Right-click · 2-finger drag = Scroll
+              Tap-hold &amp; drag = Drag/Select · 2-finger/Hold = Right-click · 3-finger tap = Reset
             </span>
           </div>
 

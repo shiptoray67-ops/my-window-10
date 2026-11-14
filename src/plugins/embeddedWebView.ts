@@ -95,6 +95,17 @@ export interface EmbeddedWebViewFindResultsEvent {
   numberOfMatches: number;
 }
 
+export interface EmbeddedWebViewScrollDirectionEvent {
+  id: string;
+  direction: 'up' | 'down' | 'top';
+  scrollY: number;
+}
+
+export interface EmbeddedWebViewKeyboardEvent {
+  visible: boolean;
+  heightPx: number;
+}
+
 export interface EmbeddedWebViewUpdateStatusEvent {
   status: 'downloading' | 'installing' | 'needs_permission' | 'error';
   progress: number;
@@ -135,14 +146,21 @@ export interface EmbeddedWebViewPluginInterface {
     y?: number;
     devicePixelRatio?: number;
     type?: NativeCursorType;
-  }): Promise<void>;
+  }): Promise<{ x: number; y: number }>;
   hideCursor(): Promise<void>;
   moveCursor(options: {
     x: number;
     y: number;
     devicePixelRatio?: number;
-  }): Promise<void>;
+  }): Promise<{ x: number; y: number }>;
+  resetCursor(options?: { devicePixelRatio?: number }): Promise<{ x: number; y: number }>;
   setCursorStyle(options: { type: NativeCursorType }): Promise<void>;
+  showClickFeedback(options?: {
+    kind?: 'left' | 'right';
+    x?: number;
+    y?: number;
+    devicePixelRatio?: number;
+  }): Promise<void>;
   setMouseModeTouchIntercept(options: { enabled: boolean }): Promise<void>;
 
   // Native MotionEvent forwarding into active WebView
@@ -166,7 +184,7 @@ export interface EmbeddedWebViewPluginInterface {
   }): Promise<void>;
   injectDrag(options: {
     id?: string;
-    phase: 'start' | 'move' | 'end';
+    phase: 'start' | 'move' | 'end' | 'cancel';
     x: number;
     y: number;
     devicePixelRatio?: number;
@@ -234,6 +252,18 @@ export interface EmbeddedWebViewPluginInterface {
   addListener(
     eventName: 'findResults',
     listenerFunc: (event: EmbeddedWebViewFindResultsEvent) => void
+  ): Promise<PluginListenerHandle>;
+  addListener(
+    eventName: 'scrollDirection',
+    listenerFunc: (event: EmbeddedWebViewScrollDirectionEvent) => void
+  ): Promise<PluginListenerHandle>;
+  addListener(
+    eventName: 'keyboardChanged',
+    listenerFunc: (event: EmbeddedWebViewKeyboardEvent) => void
+  ): Promise<PluginListenerHandle>;
+  addListener(
+    eventName: 'nativeResetGestures',
+    listenerFunc: () => void
   ): Promise<PluginListenerHandle>;
   addListener(
     eventName: 'updateStatus',

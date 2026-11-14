@@ -66,10 +66,10 @@ export const BUILTIN_APPS: Record<BuiltInAppId, AppDefinition> = {
     id: 'edge',
     title: 'Microsoft Edge',
     category: 'Productivity',
-    defaultWidth: 960,
-    defaultHeight: 620,
-    minWidth: 480,
-    minHeight: 360,
+    defaultWidth: 360,
+    defaultHeight: 580,
+    minWidth: 320,
+    minHeight: 240,
     description: 'Browse the web with tabs, bookmarks, history, and search.',
   },
   notepad: {
@@ -401,5 +401,7 @@ export const DEFAULT_SETTINGS: SystemSettings = {
   showTouchpadPanel: false,
   orientation: 'landscape',
   resolutionScale: 100,
+  uiSize: typeof window !== 'undefined' && window.innerHeight < 500 ? 'compact' : 'normal',
+  browserTextZoom: 100,
   searchEngine: 'google',
 };

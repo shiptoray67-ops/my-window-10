@@ -27,6 +27,7 @@ import {
   ResolutionScale,
   SearchEngine,
   TaskbarPosition,
+  UISize,
   WindowInstance,
 } from '../../types/os';
 import { PWAInstallButton } from '../../utils/pwa';
@@ -268,6 +269,72 @@ export const SettingsApp: React.FC<{ win: WindowInstance }> = ({ win }) => {
           <div className="max-w-xl space-y-6">
             <h2 className="text-xl font-light">Display</h2>
 
+            {/* UI Size */}
+            <div className="space-y-3 p-4 border border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-[#222222]">
+              <div>
+                <div className="text-xs font-semibold">UI size (Taskbar &amp; Title bars)</div>
+                <div className="text-[11px] text-neutral-500 mt-0.5">
+                  Adjust window bar thickness and taskbar height for small phone screens or tablets
+                </div>
+              </div>
+              <div className="grid grid-cols-3 gap-2 text-xs">
+                {(
+                  [
+                    { id: 'compact', label: 'Compact', desc: '40px taskbar · 30px title' },
+                    { id: 'normal', label: 'Normal', desc: '44px taskbar · 32px title' },
+                    { id: 'large', label: 'Large', desc: '52px taskbar · 38px title' },
+                  ] as Array<{ id: UISize; label: string; desc: string }>
+                ).map((opt) => {
+                  const active = (settings.uiSize || 'compact') === opt.id;
+                  return (
+                    <button
+                      key={opt.id}
+                      onClick={() => updateSettings({ uiSize: opt.id })}
+                      className={`p-2 border text-left transition-colors cursor-pointer ${
+                        active
+                          ? 'bg-[#0078D7] text-white border-[#0078D7]'
+                          : 'bg-white dark:bg-neutral-800 border-neutral-300 dark:border-neutral-700 hover:border-[#0078D7]'
+                      }`}
+                    >
+                      <div className="font-medium">{opt.label}</div>
+                      <div className={`text-[9.5px] mt-0.5 ${active ? 'text-white/85' : 'text-neutral-500'}`}>
+                        {opt.desc}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Browser text/page zoom */}
+            <div className="space-y-2 p-4 border border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-[#222222]">
+              <div className="flex justify-between text-xs">
+                <div>
+                  <div className="font-semibold">Browser text &amp; page zoom</div>
+                  <div className="text-[11px] text-neutral-500 mt-0.5">
+                    Default readability zoom applied inside browser windows (75%–200%)
+                  </div>
+                </div>
+                <span className="tabular-nums font-mono font-semibold text-[#0078D7]">
+                  {settings.browserTextZoom || 100}%
+                </span>
+              </div>
+              <input
+                type="range"
+                min={75}
+                max={200}
+                step={5}
+                value={settings.browserTextZoom || 100}
+                onChange={(e) => updateSettings({ browserTextZoom: Number(e.target.value) })}
+                className="w-full accent-[#0078D7]"
+              />
+              <div className="flex justify-between text-[10px] text-neutral-500">
+                <span>75%</span>
+                <span>100% (Default)</span>
+                <span>200%</span>
+              </div>
+            </div>
+
             {/* Resolution Scale */}
             <div className="space-y-3 p-4 border border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-[#222222]">
               <div>
@@ -450,16 +517,24 @@ export const SettingsApp: React.FC<{ win: WindowInstance }> = ({ win }) => {
             </div>
 
             <div className="space-y-2.5 p-4 border border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-[#222222] text-xs">
-              <div className="font-semibold">Invisible Full-Screen Touchpad Gestures</div>
+              <div className="flex items-center justify-between gap-2">
+                <div className="font-semibold">Invisible Full-Screen Touchpad Gestures</div>
+                <button
+                  onClick={() => window.dispatchEvent(new CustomEvent('win10-reset-cursor'))}
+                  className="px-2.5 py-1 bg-[#0078D7] hover:bg-[#106EBE] text-white text-[11px] font-medium cursor-pointer"
+                >
+                  Reset cursor
+                </button>
+              </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] text-neutral-600 dark:text-neutral-300">
-                <div><strong>1-finger slide anywhere:</strong> Move cursor</div>
+                <div><strong>1-finger slide anywhere:</strong> Move cursor (with acceleration)</div>
                 <div><strong>Single tap anywhere:</strong> Left click at cursor</div>
                 <div><strong>Double tap anywhere:</strong> Double click at cursor</div>
                 <div><strong>Long press (~0.5s):</strong> Right click / context menu</div>
                 <div><strong>Tap-hold, then drag:</strong> Move windows &amp; resize edges</div>
                 <div><strong>Two-finger drag:</strong> Scroll page or list</div>
                 <div><strong>Two-finger tap:</strong> Right click at cursor</div>
-                <div><strong>Taskbar button:</strong> Toggle Mouse mode ON / OFF</div>
+                <div><strong>Three-finger tap:</strong> Reset cursor to center &amp; clear state</div>
               </div>
             </div>
           </div>

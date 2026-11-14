@@ -33,7 +33,9 @@ const SETTINGS_KEY = 'win10_settings_v1';
 const DESKTOP_ICONS_KEY = 'win10_desktop_icons_v1';
 const NOTIFICATIONS_KEY = 'win10_notifications_v1';
 const ALARMS_KEY = 'win10_alarms_v1';
-const WINDOW_BOUNDS_KEY = 'win10_window_bounds_v1';
+const WINDOW_BOUNDS_KEY = 'win10_window_bounds_v2';
+
+export type WindowPreset = 'phone' | 'phone-x2' | 'tablet' | 'full' | 'small' | 'medium' | 'large';
 
 interface SavedAppBounds {
   x: number;
@@ -84,7 +86,15 @@ interface OSContextValue {
   restoreWindow: (instanceId: string) => void;
   updateWindowBounds: (instanceId: string, bounds: Partial<Pick<WindowInstance, 'x' | 'y' | 'width' | 'height' | 'isMaximized' | 'snapState' | 'prevBounds'>>) => void;
   snapWindow: (instanceId: string, side: SnapZone) => void;
+  applyWindowPreset: (instanceId: string, preset: WindowPreset) => void;
   getWorkAreaRect: () => WorkAreaRect;
+  taskbarSizePx: number;
+  focusModeWindowId: string | null;
+  focusTaskbarRevealed: boolean;
+  setFocusTaskbarRevealed: React.Dispatch<React.SetStateAction<boolean>>;
+  toggleFocusMode: (instanceId: string) => void;
+  chromeHiddenWindowIds: Record<string, boolean>;
+  setWindowChromeHidden: (instanceId: string, hidden: boolean) => void;
   toggleShowDesktop: () => void;
   startMenuOpen: boolean;
   setStartMenuOpen: React.Dispatch<React.SetStateAction<boolean>>;
@@ -203,6 +213,9 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   const [snipCapturedImage, setSnipCapturedImage] = useState<string | null>(null);
   const [interactingWindowId, setInteractingWindowId] = useState<string | null>(null);
   const [contextMenuOpen, setContextMenuOpen] = useState(false);
+  const [focusModeWindowId, setFocusModeWindowId] = useState<string | null>(null);
+  const [focusTaskbarRevealed, setFocusTaskbarRevealed] = useState(false);
+  const [chromeHiddenWindowIds, setChromeHiddenWindowIds] = useState<Record<string, boolean>>({});
 
   const [alarms, setAlarms] = useState<AlarmItem[]>(() =>
     safeLoadArray(ALARMS_KEY, [
@@ -247,36 +260,91 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     }
   }, []);
 
+  const taskbarSizePx = useMemo(() => {
+    const scale = (settings.resolutionScale || 100) / 100;
+    const isVert = !isMobile && (settings.taskbarPosition === 'left' || settings.taskbarPosition === 'right');
+    if (isVert) return Math.round((settings.uiSize === 'compact' ? 46 : settings.uiSize === 'large' ? 58 : 52) * scale);
+    const baseH =
+      settings.uiSize === 'compact'
+        ? 40
+        : settings.uiSize === 'large'
+        ? 52
+        : isMobile
+        ? 48
+        : 44;
+    return Math.round(baseH * scale);
+  }, [isMobile, settings.resolutionScale, settings.taskbarPosition, settings.uiSize]);
+
   const getWorkAreaRect = useCallback((): WorkAreaRect => {
     const vw = typeof window !== 'undefined' ? window.innerWidth : 1280;
     const vh = typeof window !== 'undefined' ? window.innerHeight : 760;
-    const scale = (settings.resolutionScale || 100) / 100;
-    const tbSize = Math.round((isMobile ? 48 : 44) * scale);
-    const railSize = Math.round(52 * scale);
+
+    if (focusModeWindowId && !focusTaskbarRevealed) {
+      return { x: 0, y: 0, width: vw, height: vh };
+    }
 
     if (isMobile) {
-      return { x: 0, y: 0, width: vw, height: Math.max(240, vh - tbSize) };
+      return { x: 0, y: 0, width: vw, height: Math.max(240, vh - taskbarSizePx) };
     }
     if (settings.taskbarPosition === 'top') {
-      return { x: 0, y: tbSize, width: vw, height: Math.max(240, vh - tbSize) };
+      return { x: 0, y: taskbarSizePx, width: vw, height: Math.max(240, vh - taskbarSizePx) };
     }
     if (settings.taskbarPosition === 'left') {
-      return { x: railSize, y: 0, width: Math.max(320, vw - railSize), height: vh };
+      return { x: taskbarSizePx, y: 0, width: Math.max(320, vw - taskbarSizePx), height: vh };
     }
     if (settings.taskbarPosition === 'right') {
-      return { x: 0, y: 0, width: Math.max(320, vw - railSize), height: vh };
+      return { x: 0, y: 0, width: Math.max(320, vw - taskbarSizePx), height: vh };
     }
-    return { x: 0, y: 0, width: vw, height: Math.max(240, vh - tbSize) };
-  }, [isMobile, settings.resolutionScale, settings.taskbarPosition]);
+    return { x: 0, y: 0, width: vw, height: Math.max(240, vh - taskbarSizePx) };
+  }, [focusModeWindowId, focusTaskbarRevealed, isMobile, settings.taskbarPosition, taskbarSizePx]);
+
+  const clampAllWindowsToWorkArea = useCallback(() => {
+    const work = getWorkAreaRect();
+    setWindows((prev) => {
+      if (prev.length === 0) return prev;
+      let changed = false;
+      const next = prev.map((w) => {
+        if (w.isMaximized) return w;
+        const minW = Math.min(320, work.width);
+        const minH = Math.min(240, work.height);
+        const clampedW = Math.min(work.width, Math.max(minW, w.width));
+        const clampedH = Math.min(work.height, Math.max(minH, w.height));
+        const clampedX = Math.max(work.x, Math.min(work.x + work.width - clampedW, w.x));
+        const clampedY = Math.max(work.y, Math.min(work.y + work.height - clampedH, w.y));
+        if (
+          clampedW !== w.width ||
+          clampedH !== w.height ||
+          clampedX !== w.x ||
+          clampedY !== w.y
+        ) {
+          changed = true;
+          return { ...w, x: clampedX, y: clampedY, width: clampedW, height: clampedH };
+        }
+        return w;
+      });
+      return changed ? next : prev;
+    });
+  }, [getWorkAreaRect]);
 
   const lastTriggeredAlarmMinuteRef = useRef<string>('');
 
-  // Responsive viewport listener (landscape stays full PC desktop mode even on narrow phones)
+  // Responsive viewport listener + strict window reclamping on resize / orientation / UI size changes
   useEffect(() => {
-    const onResize = () => setIsMobile(checkIsPortraitMobile());
+    const onResize = () => {
+      setIsMobile(checkIsPortraitMobile());
+      clampAllWindowsToWorkArea();
+    };
     window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
-  }, []);
+    window.addEventListener('orientationchange', onResize);
+    return () => {
+      window.removeEventListener('resize', onResize);
+      window.removeEventListener('orientationchange', onResize);
+    };
+  }, [clampAllWindowsToWorkArea]);
+
+  useEffect(() => {
+    clampAllWindowsToWorkArea();
+  }, [clampAllWindowsToWorkArea, settings.uiSize, settings.resolutionScale, settings.taskbarPosition, focusModeWindowId]);
 
   // Native Android immersive status bar & wake lock keeping screen awake
   useEffect(() => {
@@ -770,35 +838,44 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       soundEngine.playClick();
       topZRef.current += 1;
       const work = getWorkAreaRect();
-      const defaultW = Math.min(work.width, Math.max(320, Math.round(work.width * 0.6)));
-      const defaultH = Math.min(
-        work.height,
-        Math.max(
-          240,
-          Math.round(work.height * 0.65) - (settings.mouseMode && settings.showTouchpadPanel ? 80 : 0)
-        )
-      );
+      const isBrowserApp = appId === 'edge' || appId.startsWith('webapp-');
+
+      // Browser apps default to "Phone" (~360px wide x full work height); other apps ~60% x 65%
+      const defaultW = isBrowserApp
+        ? Math.min(work.width, Math.max(Math.min(320, work.width), 360))
+        : Math.min(work.width, Math.max(Math.min(320, work.width), Math.round(work.width * 0.6)));
+      const defaultH = isBrowserApp
+        ? work.height
+        : Math.min(
+            work.height,
+            Math.max(
+              Math.min(240, work.height),
+              Math.round(work.height * 0.65) - (settings.mouseMode && settings.showTouchpadPanel ? 80 : 0)
+            )
+          );
 
       const saved = savedBoundsRef.current[appId];
-      const cascade = (windows.length % 7) * 20;
+      const cascade = (windows.length % 5) * 20;
 
       const width = saved
-        ? Math.min(work.width, Math.max(320, saved.width))
+        ? Math.min(work.width, Math.max(Math.min(320, work.width), saved.width))
         : defaultW;
       const height = saved
-        ? Math.min(work.height, Math.max(240, saved.height))
+        ? Math.min(work.height, Math.max(Math.min(240, work.height), saved.height))
         : defaultH;
 
       const rawX = saved
         ? saved.x
-        : work.x + Math.round((work.width - width) / 2) + cascade - 24;
+        : work.x + Math.round((work.width - width) / 2) + (isBrowserApp ? 0 : cascade - 16);
       const rawY = saved
         ? saved.y
-        : work.y + Math.round((work.height - height) / 2) + cascade - 20;
+        : isBrowserApp
+        ? work.y
+        : work.y + Math.round((work.height - height) / 2) + cascade - 16;
 
-      // Guarantee titlebar always stays reachable inside work area
-      const x = Math.max(work.x - width + 120, Math.min(work.x + work.width - 120, Math.max(work.x, rawX)));
-      const y = Math.max(work.y, Math.min(work.y + work.height - 40, rawY));
+      // Guarantee whole window stays cleanly inside work area (never under taskbar or off-screen)
+      const x = Math.max(work.x, Math.min(work.x + work.width - width, rawX));
+      const y = Math.max(work.y, Math.min(work.y + work.height - height, rawY));
 
       const instanceId = `win-${appId}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
       const win: WindowInstance = {
@@ -860,6 +937,13 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   );
 
   const closeWindow = useCallback((instanceId: string) => {
+    setFocusModeWindowId((curr) => (curr === instanceId ? null : curr));
+    setChromeHiddenWindowIds((prev) => {
+      if (!prev[instanceId]) return prev;
+      const copy = { ...prev };
+      delete copy[instanceId];
+      return copy;
+    });
     setWindows((prev) => {
       const target = prev.find((w) => w.instanceId === instanceId);
       if (target) {
@@ -873,13 +957,20 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       });
       return next;
     });
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('win10-window-closed-or-minimized', { detail: { instanceId } }));
+    }
   }, [persistWindowBounds]);
 
   const minimizeWindow = useCallback((instanceId: string) => {
+    setFocusModeWindowId((curr) => (curr === instanceId ? null : curr));
     setWindows((prev) =>
       prev.map((w) => (w.instanceId === instanceId ? { ...w, isMinimized: true } : w))
     );
     setActiveWindowId((curr) => (curr === instanceId ? null : curr));
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('win10-window-closed-or-minimized', { detail: { instanceId } }));
+    }
   }, []);
 
   const maximizeWindow = useCallback((instanceId: string) => {
@@ -905,23 +996,29 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   }, [persistWindowBounds]);
 
   const restoreWindow = useCallback((instanceId: string) => {
+    setFocusModeWindowId((curr) => (curr === instanceId ? null : curr));
     topZRef.current += 1;
     const work = getWorkAreaRect();
     setWindows((prev) =>
       prev.map((w) => {
         if (w.instanceId !== instanceId) return w;
-        const fallbackW = Math.min(work.width, Math.max(320, Math.round(work.width * 0.6)));
-        const fallbackH = Math.min(work.height, Math.max(240, Math.round(work.height * 0.65)));
+        const isBrowser = w.appId === 'edge' || w.appId.startsWith('webapp-');
+        const fallbackW = isBrowser
+          ? Math.min(work.width, Math.max(Math.min(320, work.width), 360))
+          : Math.min(work.width, Math.max(Math.min(320, work.width), Math.round(work.width * 0.6)));
+        const fallbackH = isBrowser
+          ? work.height
+          : Math.min(work.height, Math.max(Math.min(240, work.height), Math.round(work.height * 0.65)));
         const bounds = w.prevBounds || {
           x: work.x + Math.round((work.width - fallbackW) / 2),
-          y: work.y + Math.round((work.height - fallbackH) / 2),
+          y: isBrowser ? work.y : work.y + Math.round((work.height - fallbackH) / 2),
           width: fallbackW,
           height: fallbackH,
         };
-        const width = Math.min(work.width, Math.max(320, bounds.width));
-        const height = Math.min(work.height, Math.max(240, bounds.height));
-        const x = Math.max(work.x - width + 120, Math.min(work.x + work.width - 120, bounds.x));
-        const y = Math.max(work.y, Math.min(work.y + work.height - 40, bounds.y));
+        const width = Math.min(work.width, Math.max(Math.min(320, work.width), bounds.width));
+        const height = Math.min(work.height, Math.max(Math.min(240, work.height), bounds.height));
+        const x = Math.max(work.x, Math.min(work.x + work.width - width, bounds.x));
+        const y = Math.max(work.y, Math.min(work.y + work.height - height, bounds.y));
         const nextWin: WindowInstance = {
           ...w,
           isMaximized: false,
@@ -962,6 +1059,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       maximizeWindow(instanceId);
       return;
     }
+    setFocusModeWindowId((curr) => (curr === instanceId ? null : curr));
     const work = getWorkAreaRect();
     const halfW = Math.floor(work.width / 2);
     const halfH = Math.floor(work.height / 2);
@@ -1048,8 +1146,164 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     setActiveWindowId(instanceId);
   }, [getWorkAreaRect, maximizeWindow, persistWindowBounds]);
 
+  const applyWindowPreset = useCallback(
+    (instanceId: string, preset: WindowPreset) => {
+      if (preset === 'full') {
+        maximizeWindow(instanceId);
+        return;
+      }
+
+      setFocusModeWindowId((curr) => (curr === instanceId ? null : curr));
+      const work = getWorkAreaRect();
+      const minW = Math.min(320, work.width);
+      const minH = Math.min(240, work.height);
+
+      if (preset === 'phone-x2') {
+        const halfW = Math.floor(work.width / 2);
+        const rightW = work.width - halfW;
+        topZRef.current += 2;
+
+        setWindows((prev) => {
+          const other = prev.find((w) => w.instanceId !== instanceId && !w.isMinimized);
+          if (other) {
+            return prev.map((w) => {
+              if (w.instanceId === instanceId) {
+                const nw: WindowInstance = {
+                  ...w,
+                  isMaximized: false,
+                  isMinimized: false,
+                  snapState: 'left',
+                  x: work.x,
+                  y: work.y,
+                  width: halfW,
+                  height: work.height,
+                  zIndex: topZRef.current,
+                };
+                persistWindowBounds(w.appId, nw);
+                return nw;
+              }
+              if (w.instanceId === other.instanceId) {
+                const nw: WindowInstance = {
+                  ...w,
+                  isMaximized: false,
+                  isMinimized: false,
+                  snapState: 'right',
+                  x: work.x + halfW,
+                  y: work.y,
+                  width: rightW,
+                  height: work.height,
+                  zIndex: topZRef.current - 1,
+                };
+                persistWindowBounds(w.appId, nw);
+                return nw;
+              }
+              return w;
+            });
+          }
+
+          // No second visible window open yet — open a second Edge window side-by-side on the right half
+          const edgeDef = getAppDefinition('edge');
+          const secondId = `win-edge-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+          const rightEdgeWin: WindowInstance = {
+            instanceId: secondId,
+            appId: 'edge',
+            title: edgeDef?.title || 'Microsoft Edge',
+            x: work.x + halfW,
+            y: work.y,
+            width: rightW,
+            height: work.height,
+            isMinimized: false,
+            isMaximized: false,
+            snapState: 'right',
+            zIndex: topZRef.current - 1,
+          };
+          return [
+            ...prev.map((w) => {
+              if (w.instanceId !== instanceId) return w;
+              const nw: WindowInstance = {
+                ...w,
+                isMaximized: false,
+                isMinimized: false,
+                snapState: 'left',
+                x: work.x,
+                y: work.y,
+                width: halfW,
+                height: work.height,
+                zIndex: topZRef.current,
+              };
+              persistWindowBounds(w.appId, nw);
+              return nw;
+            }),
+            rightEdgeWin,
+          ];
+        });
+        setActiveWindowId(instanceId);
+        return;
+      }
+
+      let nextW: number;
+      let nextH: number;
+      let nextX: number;
+      let nextY: number;
+
+      if (preset === 'phone') {
+        nextW = Math.min(work.width, Math.max(minW, 360));
+        nextH = work.height;
+        nextX = work.x + Math.round((work.width - nextW) / 2);
+        nextY = work.y;
+      } else if (preset === 'tablet') {
+        nextW = Math.min(work.width, Math.max(minW, Math.round(work.width * 0.6)));
+        nextH = Math.min(work.height, Math.max(minH, Math.round(work.height * 0.85)));
+        nextX = work.x + Math.round((work.width - nextW) / 2);
+        nextY = work.y + Math.round((work.height - nextH) / 2);
+      } else {
+        const ratio =
+          preset === 'small'
+            ? { w: 0.4, h: 0.48 }
+            : preset === 'medium'
+            ? { w: 0.6, h: 0.65 }
+            : { w: 0.85, h: 0.88 };
+        nextW = Math.min(work.width, Math.max(minW, Math.round(work.width * ratio.w)));
+        nextH = Math.min(work.height, Math.max(minH, Math.round(work.height * ratio.h)));
+        nextX = work.x + Math.round((work.width - nextW) / 2);
+        nextY = work.y + Math.round((work.height - nextH) / 2);
+      }
+
+      updateWindowBounds(instanceId, {
+        isMaximized: false,
+        snapState: 'none',
+        x: Math.max(work.x, Math.min(work.x + work.width - nextW, nextX)),
+        y: Math.max(work.y, Math.min(work.y + work.height - nextH, nextY)),
+        width: nextW,
+        height: nextH,
+      });
+      setActiveWindowId(instanceId);
+    },
+    [getAppDefinition, getWorkAreaRect, maximizeWindow, persistWindowBounds, updateWindowBounds]
+  );
+
+  const toggleFocusMode = useCallback(
+    (instanceId: string) => {
+      setFocusTaskbarRevealed(false);
+      setFocusModeWindowId((curr) => {
+        if (curr === instanceId) return null;
+        maximizeWindow(instanceId);
+        return instanceId;
+      });
+    },
+    [maximizeWindow]
+  );
+
+  const setWindowChromeHidden = useCallback((instanceId: string, hidden: boolean) => {
+    setChromeHiddenWindowIds((prev) => {
+      if (Boolean(prev[instanceId]) === hidden) return prev;
+      return { ...prev, [instanceId]: hidden };
+    });
+  }, []);
+
   const toggleShowDesktop = useCallback(() => {
     closeAllOverlays();
+    setFocusModeWindowId(null);
     setWindows((prev) => {
       const anyVisible = prev.some((w) => !w.isMinimized);
       return prev.map((w) => ({ ...w, isMinimized: anyVisible }));
@@ -1335,7 +1589,15 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       restoreWindow,
       updateWindowBounds,
       snapWindow,
+      applyWindowPreset,
       getWorkAreaRect,
+      taskbarSizePx,
+      focusModeWindowId,
+      focusTaskbarRevealed,
+      setFocusTaskbarRevealed,
+      toggleFocusMode,
+      chromeHiddenWindowIds,
+      setWindowChromeHidden,
       toggleShowDesktop,
       startMenuOpen,
       setStartMenuOpen,
@@ -1413,7 +1675,14 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       restoreWindow,
       updateWindowBounds,
       snapWindow,
+      applyWindowPreset,
       getWorkAreaRect,
+      taskbarSizePx,
+      focusModeWindowId,
+      focusTaskbarRevealed,
+      toggleFocusMode,
+      chromeHiddenWindowIds,
+      setWindowChromeHidden,
       toggleShowDesktop,
       startMenuOpen,
       searchQuery,

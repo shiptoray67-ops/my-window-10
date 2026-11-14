@@ -15,12 +15,16 @@ import {
   History,
   Home,
   Laptop,
+  Layers,
+  Maximize2,
+  Minimize2,
   MoreHorizontal,
   Plus,
   RotateCw,
   Search,
   Share2,
   ShieldAlert,
+  Sliders,
   Smartphone,
   Star,
   Trash2,
@@ -177,10 +181,18 @@ export const EdgeBrowser: React.FC<{
     interactingWindowId,
     installWebApp,
     addNotification,
+    openApp,
+    focusModeWindowId,
+    toggleFocusMode,
+    chromeHiddenWindowIds,
+    setWindowChromeHidden,
   } = useOS();
 
   const isNative = Capacitor.isNativePlatform();
   const searchEngine = settings.searchEngine || 'google';
+  const defaultZoom = settings.browserTextZoom || 100;
+  const isChromeHidden = Boolean(chromeHiddenWindowIds[win.instanceId]);
+  const isFocusedMode = focusModeWindowId === win.instanceId;
 
   const makeTabId = useCallback(
     () => `${win.instanceId}-tab-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
@@ -204,7 +216,7 @@ export const EdgeBrowser: React.FC<{
       url: normalizedInitial,
       incognito: false,
       desktopMode: false,
-      zoom: 100,
+      zoom: defaultZoom,
       progress: 0,
       isLoading: normalizedInitial.startsWith('http'),
       canGoBack: false,
@@ -253,6 +265,7 @@ export const EdgeBrowser: React.FC<{
 
   const [drawer, setDrawer] = useState<'bookmarks' | 'history' | 'downloads' | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [tabMenuOpen, setTabMenuOpen] = useState(false);
   const [findBarOpen, setFindBarOpen] = useState(false);
   const [findQuery, setFindQuery] = useState('');
   const [findMatchInfo, setFindMatchInfo] = useState<{ active: number; total: number }>({
@@ -262,14 +275,19 @@ export const EdgeBrowser: React.FC<{
   const [installAppModal, setInstallAppModal] = useState(false);
   const [installAppTitle, setInstallAppTitle] = useState('');
   const [copiedToast, setCopiedToast] = useState(false);
+  const [containerWidth, setContainerWidth] = useState<number>(win.width || 360);
 
   // Web preview fallback state (only used when !isNative)
   const [reloadTick, setReloadTick] = useState(0);
   const [webIframeStatus, setWebIframeStatus] = useState<'idle' | 'loading' | 'loaded' | 'blocked' | 'timeout'>('idle');
 
+  const rootContainerRef = useRef<HTMLDivElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
   const createdWebViewsRef = useRef<Set<string>>(new Set());
   const rafSyncRef = useRef<number | null>(null);
+  const overlayLockRef = useRef(false);
+  overlayLockRef.current = Boolean(menuOpen || tabMenuOpen || findBarOpen || drawer || installAppModal);
+  const isNarrow = containerWidth < 560;
 
   // Persist bookmarks, history & downloads
   useEffect(() => {
@@ -323,6 +341,7 @@ export const EdgeBrowser: React.FC<{
     !isCoveredByWindow &&
     interactingWindowId === null &&
     !menuOpen &&
+    !tabMenuOpen &&
     !installAppModal;
 
   const shouldShowNativeRef = useRef(shouldShowNative);
@@ -477,7 +496,48 @@ export const EdgeBrowser: React.FC<{
     syncBoundsNow,
   ]);
 
-  // Observe placeholder div resizing, window moves, scroll events, and resolution scale changes
+  // Track Edge container width for responsive toolbar (Phone/narrow vs Tablet/desktop)
+  useEffect(() => {
+    const el = rootContainerRef.current;
+    if (!el) return;
+    setContainerWidth(el.clientWidth || win.width || 360);
+    const ro = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect?.width;
+      if (typeof w === 'number' && w > 0) {
+        setContainerWidth(w);
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [win.width]);
+
+  // Ensure chrome is visible on home page, tab switch, open popovers/drawers, or window unmount
+  useEffect(() => {
+    if (!activeTab.url.startsWith('http') || menuOpen || tabMenuOpen || findBarOpen || drawer || installAppModal) {
+      setWindowChromeHidden(win.instanceId, false);
+    }
+  }, [activeTab.id, activeTab.url, drawer, findBarOpen, installAppModal, menuOpen, setWindowChromeHidden, tabMenuOpen, win.instanceId]);
+
+  useEffect(() => {
+    return () => {
+      setWindowChromeHidden(win.instanceId, false);
+    };
+  }, [setWindowChromeHidden, win.instanceId]);
+
+  // Apply global Browser text & page zoom updates from Settings > Display
+  const lastAppliedGlobalZoomRef = useRef<number>(defaultZoom);
+  useEffect(() => {
+    if (lastAppliedGlobalZoomRef.current === defaultZoom) return;
+    lastAppliedGlobalZoomRef.current = defaultZoom;
+    setTabs((prev) => prev.map((t) => ({ ...t, zoom: defaultZoom })));
+    if (isNative) {
+      createdWebViewsRef.current.forEach((tabId) => {
+        void EmbeddedWebView.setZoom({ id: tabId, zoom: defaultZoom }).catch(() => {});
+      });
+    }
+  }, [defaultZoom, isNative]);
+
+  // Observe placeholder div resizing, window moves, scroll events, keyboard/visualViewport, and UI scale changes
   useEffect(() => {
     if (!isNative) return;
     const el = viewportRef.current;
@@ -486,11 +546,15 @@ export const EdgeBrowser: React.FC<{
 
     window.addEventListener('resize', scheduleSyncBounds);
     window.addEventListener('scroll', scheduleSyncBounds, true);
+    window.visualViewport?.addEventListener('resize', scheduleSyncBounds);
+    window.visualViewport?.addEventListener('scroll', scheduleSyncBounds);
 
     return () => {
       ro?.disconnect();
       window.removeEventListener('resize', scheduleSyncBounds);
       window.removeEventListener('scroll', scheduleSyncBounds, true);
+      window.visualViewport?.removeEventListener('resize', scheduleSyncBounds);
+      window.visualViewport?.removeEventListener('scroll', scheduleSyncBounds);
     };
   }, [isNative, scheduleSyncBounds, activeTab.id]);
 
@@ -507,8 +571,13 @@ export const EdgeBrowser: React.FC<{
     win.height,
     win.isMaximized,
     settings.resolutionScale,
+    settings.uiSize,
+    isChromeHidden,
+    isNarrow,
+    focusModeWindowId,
     drawer,
     findBarOpen,
+    tabMenuOpen,
   ]);
 
   // Open URL in a new tab inside the SAME browser window
@@ -525,7 +594,7 @@ export const EdgeBrowser: React.FC<{
         url: normalized,
         incognito,
         desktopMode: false,
-        zoom: 100,
+        zoom: defaultZoom,
         progress: normalized.startsWith('http') ? 15 : 0,
         isLoading: normalized.startsWith('http'),
         canGoBack: false,
@@ -537,6 +606,8 @@ export const EdgeBrowser: React.FC<{
       setTabs((prev) => [...prev, newTab]);
       setActiveTabId(newId);
       setAddressInput(normalized);
+      setTabMenuOpen(false);
+      setWindowChromeHidden(win.instanceId, false);
 
       if (normalized.startsWith('http') && !incognito) {
         setHistoryList((prev) => [
@@ -551,7 +622,7 @@ export const EdgeBrowser: React.FC<{
         }, 20);
       }
     },
-    [ensureOrLoadNativeTab, isNative, makeTabId, searchEngine]
+    [defaultZoom, ensureOrLoadNativeTab, isNative, makeTabId, searchEngine, setWindowChromeHidden, win.instanceId]
   );
 
   const openUrlInNewTabRef = useRef(openUrlInNewTab);
@@ -705,6 +776,26 @@ export const EdgeBrowser: React.FC<{
           });
         })
       );
+
+      handles.push(
+        await EmbeddedWebView.addListener('scrollDirection', (ev) => {
+          if (!active || activeTabRef.current?.id !== ev.id) return;
+          if (ev.direction === 'down') {
+            if (!overlayLockRef.current && activeTabRef.current?.url.startsWith('http')) {
+              setWindowChromeHidden(win.instanceId, true);
+            }
+          } else if (ev.direction === 'up' || ev.direction === 'top') {
+            setWindowChromeHidden(win.instanceId, false);
+          }
+        })
+      );
+
+      handles.push(
+        await EmbeddedWebView.addListener('keyboardChanged', () => {
+          if (!active) return;
+          scheduleSyncBounds();
+        })
+      );
     })();
 
     return () => {
@@ -713,7 +804,7 @@ export const EdgeBrowser: React.FC<{
         void h.remove().catch(() => {});
       });
     };
-  }, [addNotification, isNative]);
+  }, [addNotification, isNative, scheduleSyncBounds, setWindowChromeHidden, win.instanceId]);
 
   // Sync address bar & non-native web iframe fallback on tab change
   useEffect(() => {
@@ -867,7 +958,7 @@ export const EdgeBrowser: React.FC<{
         url: 'edge://home',
         incognito,
         desktopMode: false,
-        zoom: 100,
+        zoom: defaultZoom,
         progress: 0,
         isLoading: false,
         canGoBack: false,
@@ -879,6 +970,8 @@ export const EdgeBrowser: React.FC<{
     ]);
     setActiveTabId(id);
     setMenuOpen(false);
+    setTabMenuOpen(false);
+    setWindowChromeHidden(win.instanceId, false);
   };
 
   const closeTab = (id: string) => {
@@ -892,7 +985,7 @@ export const EdgeBrowser: React.FC<{
           url: 'edge://home',
           incognito: false,
           desktopMode: false,
-          zoom: 100,
+          zoom: defaultZoom,
           progress: 0,
           isLoading: false,
           canGoBack: false,
@@ -903,6 +996,8 @@ export const EdgeBrowser: React.FC<{
         },
       ]);
       setActiveTabId(resetId);
+      setTabMenuOpen(false);
+      setWindowChromeHidden(win.instanceId, false);
       return;
     }
     const idx = tabs.findIndex((t) => t.id === id);
@@ -1193,9 +1288,16 @@ export const EdgeBrowser: React.FC<{
   };
 
   return (
-    <div className="flex flex-col h-full bg-neutral-100 dark:bg-[#202020] text-neutral-900 dark:text-neutral-100 relative">
-      {/* Tab Strip (hidden in standalone web-app mode) */}
-      {!standaloneUrl && (
+    <div
+      ref={rootContainerRef}
+      onMouseDown={() => {
+        if (menuOpen) setMenuOpen(false);
+        if (tabMenuOpen) setTabMenuOpen(false);
+      }}
+      className="flex flex-col h-full bg-neutral-100 dark:bg-[#202020] text-neutral-900 dark:text-neutral-100 relative"
+    >
+      {/* Wide Tab Strip (hidden in standalone web-app mode, narrow Phone mode, or auto-hidden chrome) */}
+      {!standaloneUrl && !isNarrow && !isChromeHidden && (
         <div
           className={`flex items-center gap-1 px-2 pt-1 border-b overflow-x-auto no-scrollbar ${
             activeTab.incognito
@@ -1254,255 +1356,476 @@ export const EdgeBrowser: React.FC<{
       )}
 
       {/* Navigation & Address Bar */}
-      <div className="flex items-center gap-1 px-2 py-1 bg-neutral-100 dark:bg-[#2b2b2b] border-b border-neutral-200 dark:border-neutral-800 shrink-0">
-        <button
-          onClick={() => void handleBack()}
-          disabled={!activeTab.canGoBack && activeTab.historyIndex <= 0}
-          className="p-1.5 hover:bg-black/10 dark:hover:bg-white/10 disabled:opacity-35 cursor-pointer shrink-0"
-          title="Back"
-        >
-          <ArrowLeft className="w-3.5 h-3.5" />
-        </button>
-        <button
-          onClick={() => void handleForward()}
-          disabled={!activeTab.canGoForward && activeTab.historyIndex >= activeTab.historyStack.length - 1}
-          className="p-1.5 hover:bg-black/10 dark:hover:bg-white/10 disabled:opacity-35 cursor-pointer shrink-0"
-          title="Forward"
-        >
-          <ArrowRight className="w-3.5 h-3.5" />
-        </button>
-        <button
-          onClick={handleReloadOrStop}
-          className="p-1.5 hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer shrink-0"
-          title={activeTab.isLoading ? 'Stop loading' : 'Reload'}
-        >
-          {activeTab.isLoading ? <X className="w-3.5 h-3.5" /> : <RotateCw className="w-3.5 h-3.5" />}
-        </button>
-        {!standaloneUrl && (
+      {!isChromeHidden && (
+        <div className="flex items-center gap-1 px-1.5 sm:px-2 py-1 bg-neutral-100 dark:bg-[#2b2b2b] border-b border-neutral-200 dark:border-neutral-800 shrink-0">
           <button
-            onClick={() => navigateTab('edge://home')}
-            className="p-1.5 hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer shrink-0"
-            title="Home"
+            onClick={() => void handleBack()}
+            disabled={!activeTab.canGoBack && activeTab.historyIndex <= 0}
+            className="min-w-[30px] h-7 sm:p-1.5 flex items-center justify-center hover:bg-black/10 dark:hover:bg-white/10 disabled:opacity-35 cursor-pointer shrink-0"
+            title="Back"
           >
-            <Home className="w-3.5 h-3.5" />
+            <ArrowLeft className="w-3.5 h-3.5" />
           </button>
-        )}
-
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            navigateTab(addressInput);
-          }}
-          className="flex-1 flex items-center bg-white dark:bg-neutral-900 border border-neutral-300 dark:border-neutral-700 focus-within:border-[#0078D7] px-2 h-7 min-w-0"
-        >
-          {activeTab.incognito && (
-            <span className="px-1.5 py-0.5 mr-1.5 text-[9.5px] font-semibold bg-sky-600 text-white shrink-0">
-              InPrivate
-            </span>
-          )}
-          <input
-            type="text"
-            value={addressInput}
-            onChange={(e) => setAddressInput(e.target.value)}
-            onFocus={(e) => e.currentTarget.select()}
-            className="w-full bg-transparent text-xs outline-none min-w-0"
-            placeholder="Search or enter web address"
-          />
-          {activeTab.url.startsWith('http') && (
+          <button
+            onClick={() => void handleForward()}
+            disabled={!activeTab.canGoForward && activeTab.historyIndex >= activeTab.historyStack.length - 1}
+            className="min-w-[30px] h-7 sm:p-1.5 flex items-center justify-center hover:bg-black/10 dark:hover:bg-white/10 disabled:opacity-35 cursor-pointer shrink-0"
+            title="Forward"
+          >
+            <ArrowRight className="w-3.5 h-3.5" />
+          </button>
+          <button
+            onClick={handleReloadOrStop}
+            className="min-w-[30px] h-7 sm:p-1.5 flex items-center justify-center hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer shrink-0"
+            title={activeTab.isLoading ? 'Stop loading' : 'Reload'}
+          >
+            {activeTab.isLoading ? <X className="w-3.5 h-3.5" /> : <RotateCw className="w-3.5 h-3.5" />}
+          </button>
+          {!standaloneUrl && !isNarrow && (
             <button
-              type="button"
-              onClick={toggleBookmark}
-              className="p-1 text-neutral-400 hover:text-amber-500 cursor-pointer shrink-0"
-              title={isBookmarked ? 'Remove bookmark' : 'Bookmark this page'}
+              onClick={() => navigateTab('edge://home')}
+              className="p-1.5 hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer shrink-0"
+              title="Home"
             >
-              <Star className={`w-3.5 h-3.5 ${isBookmarked ? 'fill-amber-400 text-amber-400' : ''}`} />
+              <Home className="w-3.5 h-3.5" />
             </button>
           )}
-        </form>
 
-        {/* Desktop Site Toggle */}
-        <button
-          onClick={toggleDesktopMode}
-          className={`p-1.5 cursor-pointer shrink-0 ${
-            activeTab.desktopMode
-              ? 'bg-[#0078D7] text-white'
-              : 'hover:bg-black/10 dark:hover:bg-white/10'
-          }`}
-          title={activeTab.desktopMode ? 'Desktop site: ON' : 'Desktop site: OFF (Mobile view)'}
-        >
-          {activeTab.desktopMode ? (
-            <Laptop className="w-3.5 h-3.5" />
-          ) : (
-            <Smartphone className="w-3.5 h-3.5" />
-          )}
-        </button>
-
-        {/* Find in Page Toggle */}
-        {activeTab.url.startsWith('http') && isNative && (
-          <button
-            onClick={() => {
-              if (findBarOpen) closeFindBar();
-              else setFindBarOpen(true);
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              navigateTab(addressInput);
             }}
-            className={`p-1.5 hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer shrink-0 ${
-              findBarOpen ? 'bg-black/10 dark:bg-white/15' : ''
+            className={`flex-1 flex items-center bg-white dark:bg-neutral-900 border border-neutral-300 dark:border-neutral-700 focus-within:border-[#0078D7] px-2 h-7 ${
+              isNarrow ? 'min-w-[50%]' : 'min-w-0'
             }`}
-            title="Find in page"
           >
-            <Search className="w-3.5 h-3.5" />
-          </button>
-        )}
+            {activeTab.incognito && (
+              <span className="px-1.5 py-0.5 mr-1 text-[9.5px] font-semibold bg-sky-600 text-white shrink-0">
+                InPrivate
+              </span>
+            )}
+            <input
+              type="text"
+              value={addressInput}
+              onChange={(e) => setAddressInput(e.target.value)}
+              onFocus={(e) => e.currentTarget.select()}
+              className="w-full bg-transparent text-xs outline-none min-w-0"
+              placeholder="Search or enter URL"
+            />
+            {activeTab.url.startsWith('http') && !isNarrow && (
+              <button
+                type="button"
+                onClick={toggleBookmark}
+                className="p-1 text-neutral-400 hover:text-amber-500 cursor-pointer shrink-0"
+                title={isBookmarked ? 'Remove bookmark' : 'Bookmark this page'}
+              >
+                <Star className={`w-3.5 h-3.5 ${isBookmarked ? 'fill-amber-400 text-amber-400' : ''}`} />
+              </button>
+            )}
+          </form>
 
-        {!standaloneUrl && (
-          <>
-            <button
-              onClick={() => setDrawer((d) => (d === 'bookmarks' ? null : 'bookmarks'))}
-              className={`p-1.5 hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer shrink-0 ${
-                drawer === 'bookmarks' ? 'bg-black/10 dark:bg-white/15' : ''
-              }`}
-              title="Bookmarks"
-            >
-              <Bookmark className="w-3.5 h-3.5" />
-            </button>
-            <button
-              onClick={() => setDrawer((d) => (d === 'history' ? null : 'history'))}
-              className={`p-1.5 hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer shrink-0 ${
-                drawer === 'history' ? 'bg-black/10 dark:bg-white/15' : ''
-              }`}
-              title="History"
-            >
-              <History className="w-3.5 h-3.5" />
-            </button>
-            <button
-              onClick={() => setDrawer((d) => (d === 'downloads' ? null : 'downloads'))}
-              className={`p-1.5 hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer shrink-0 ${
-                drawer === 'downloads' ? 'bg-black/10 dark:bg-white/15' : ''
-              }`}
-              title="Downloads"
-            >
-              <Download className="w-3.5 h-3.5" />
-            </button>
-          </>
-        )}
+          {/* Compact Tabs Switcher Button (narrow / Phone windows) */}
+          {!standaloneUrl && isNarrow && (
+            <div className="relative shrink-0">
+              <button
+                onClick={() => {
+                  setMenuOpen(false);
+                  setTabMenuOpen((o) => !o);
+                }}
+                className={`min-w-[30px] h-7 px-1.5 flex items-center justify-center hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer ${
+                  tabMenuOpen ? 'bg-black/10 dark:bg-white/15' : ''
+                }`}
+                title="Switch tabs"
+              >
+                <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-bold border-[1.5px] border-current rounded-[3px] leading-none">
+                  {tabs.length}
+                </span>
+              </button>
 
-        {/* More Menu */}
-        <div className="relative shrink-0">
-          <button
-            onClick={() => setMenuOpen((o) => !o)}
-            className={`p-1.5 hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer ${
-              menuOpen ? 'bg-black/10 dark:bg-white/15' : ''
-            }`}
-            title="Settings and more"
-          >
-            <MoreHorizontal className="w-3.5 h-3.5" />
-          </button>
-
-          {menuOpen && (
-            <div
-              onMouseDown={(e) => e.stopPropagation()}
-              className="absolute right-0 top-full mt-1 w-60 bg-white dark:bg-neutral-900 border border-neutral-300 dark:border-neutral-700 shadow-2xl z-50 py-1.5 text-xs"
-            >
-              <div className="px-3 py-1.5 flex items-center justify-between border-b border-neutral-200 dark:border-neutral-800">
-                <span className="font-medium">Zoom</span>
-                <div className="flex items-center gap-1">
-                  <button
-                    onClick={() => adjustZoom(-15)}
-                    className="p-1 hover:bg-neutral-200 dark:hover:bg-neutral-800 cursor-pointer"
-                    title="Zoom out"
-                  >
-                    <ZoomOut className="w-3.5 h-3.5" />
-                  </button>
-                  <span className="w-10 text-center tabular-nums">{activeTab.zoom}%</span>
-                  <button
-                    onClick={() => adjustZoom(15)}
-                    className="p-1 hover:bg-neutral-200 dark:hover:bg-neutral-800 cursor-pointer"
-                    title="Zoom in"
-                  >
-                    <ZoomIn className="w-3.5 h-3.5" />
-                  </button>
+              {tabMenuOpen && (
+                <div
+                  onMouseDown={(e) => e.stopPropagation()}
+                  className="absolute right-0 top-full mt-1 w-64 max-w-[calc(100vw-24px)] max-h-[70vh] overflow-y-auto bg-white dark:bg-neutral-900 border border-neutral-300 dark:border-neutral-700 shadow-2xl z-50 py-1.5 text-xs"
+                >
+                  <div className="px-3 py-1.5 flex items-center justify-between border-b border-neutral-200 dark:border-neutral-800">
+                    <span className="font-semibold text-[11px] flex items-center gap-1.5">
+                      <Layers className="w-3.5 h-3.5 text-[#0078D7]" /> Open tabs ({tabs.length})
+                    </span>
+                    <div className="flex items-center gap-1">
+                      <button
+                        onClick={() => addTab(false)}
+                        className="px-2 py-0.5 bg-[#0078D7] text-white text-[10.5px] hover:bg-[#106EBE] cursor-pointer"
+                        title="New tab"
+                      >
+                        + New
+                      </button>
+                      <button
+                        onClick={() => addTab(true)}
+                        className="p-1 hover:bg-neutral-200 dark:hover:bg-neutral-800 cursor-pointer"
+                        title="New InPrivate tab"
+                      >
+                        <EyeOff className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                  <div className="py-1">
+                    {tabs.map((tab) => {
+                      const active = tab.id === activeTab.id;
+                      return (
+                        <div
+                          key={tab.id}
+                          onClick={() => {
+                            setActiveTabId(tab.id);
+                            setTabMenuOpen(false);
+                          }}
+                          className={`flex items-center gap-2 px-3 py-2 cursor-pointer ${
+                            active
+                              ? 'bg-[#0078D7]/15 text-[#0078D7] dark:text-sky-400 font-medium'
+                              : 'hover:bg-neutral-100 dark:hover:bg-neutral-800'
+                          }`}
+                        >
+                          {tab.incognito ? (
+                            <EyeOff className="w-3.5 h-3.5 shrink-0 text-sky-400" />
+                          ) : tab.favicon ? (
+                            <img src={tab.favicon} alt="" className="w-3.5 h-3.5 shrink-0 rounded-[2px]" />
+                          ) : (
+                            <Globe className="w-3.5 h-3.5 shrink-0 text-[#0078D7]" />
+                          )}
+                          <span className="truncate flex-1">{tab.title}</span>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              closeTab(tab.id);
+                            }}
+                            className="p-1 opacity-70 hover:opacity-100 hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer"
+                            title="Close tab"
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
-              </div>
+              )}
+            </div>
+          )}
+
+          {/* Wide-mode inline toolbar controls (hidden when narrow to preserve Address Bar >= 50%) */}
+          {!isNarrow && (
+            <>
+              <button
+                onClick={toggleDesktopMode}
+                className={`p-1.5 cursor-pointer shrink-0 ${
+                  activeTab.desktopMode
+                    ? 'bg-[#0078D7] text-white'
+                    : 'hover:bg-black/10 dark:hover:bg-white/10'
+                }`}
+                title={activeTab.desktopMode ? 'Desktop site: ON' : 'Desktop site: OFF (Mobile view)'}
+              >
+                {activeTab.desktopMode ? (
+                  <Laptop className="w-3.5 h-3.5" />
+                ) : (
+                  <Smartphone className="w-3.5 h-3.5" />
+                )}
+              </button>
+
+              {activeTab.url.startsWith('http') && isNative && (
+                <button
+                  onClick={() => {
+                    if (findBarOpen) closeFindBar();
+                    else setFindBarOpen(true);
+                  }}
+                  className={`p-1.5 hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer shrink-0 ${
+                    findBarOpen ? 'bg-black/10 dark:bg-white/15' : ''
+                  }`}
+                  title="Find in page"
+                >
+                  <Search className="w-3.5 h-3.5" />
+                </button>
+              )}
+
+              <button
+                onClick={() => toggleFocusMode(win.instanceId)}
+                className={`p-1.5 cursor-pointer shrink-0 ${
+                  isFocusedMode
+                    ? 'bg-[#0078D7] text-white'
+                    : 'hover:bg-black/10 dark:hover:bg-white/10'
+                }`}
+                title={isFocusedMode ? 'Exit Focus mode' : 'Focus mode (Full screen & auto-hide taskbar)'}
+              >
+                {isFocusedMode ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
+              </button>
 
               {!standaloneUrl && (
                 <>
                   <button
-                    onClick={() => addTab(true)}
-                    className="w-full flex items-center gap-2.5 px-3 py-2 hover:bg-[#0078D7] hover:text-white cursor-pointer"
+                    onClick={() => setDrawer((d) => (d === 'bookmarks' ? null : 'bookmarks'))}
+                    className={`p-1.5 hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer shrink-0 ${
+                      drawer === 'bookmarks' ? 'bg-black/10 dark:bg-white/15' : ''
+                    }`}
+                    title="Bookmarks"
                   >
-                    <EyeOff className="w-3.5 h-3.5" /> New InPrivate tab
+                    <Bookmark className="w-3.5 h-3.5" />
                   </button>
-                  {activeTab.url.startsWith('http') && (
-                    <button
-                      onClick={() => {
-                        setMenuOpen(false);
-                        openUrlInNewTab(activeTab.url, activeTab.incognito);
-                      }}
-                      className="w-full flex items-center gap-2.5 px-3 py-2 hover:bg-[#0078D7] hover:text-white cursor-pointer"
-                    >
-                      <ExternalLink className="w-3.5 h-3.5" /> Open link in new tab
-                    </button>
-                  )}
+                  <button
+                    onClick={() => setDrawer((d) => (d === 'history' ? null : 'history'))}
+                    className={`p-1.5 hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer shrink-0 ${
+                      drawer === 'history' ? 'bg-black/10 dark:bg-white/15' : ''
+                    }`}
+                    title="History"
+                  >
+                    <History className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    onClick={() => setDrawer((d) => (d === 'downloads' ? null : 'downloads'))}
+                    className={`p-1.5 hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer shrink-0 ${
+                      drawer === 'downloads' ? 'bg-black/10 dark:bg-white/15' : ''
+                    }`}
+                    title="Downloads"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                  </button>
                 </>
               )}
+            </>
+          )}
 
-              {activeTab.url.startsWith('http') && (
-                <>
-                  <button
-                    onClick={() => void handleCopyOrShare('copy')}
-                    className="w-full flex items-center gap-2.5 px-3 py-2 hover:bg-[#0078D7] hover:text-white cursor-pointer"
-                  >
-                    <Copy className="w-3.5 h-3.5" /> Copy link
-                  </button>
-                  <button
-                    onClick={() => void handleCopyOrShare('share')}
-                    className="w-full flex items-center gap-2.5 px-3 py-2 hover:bg-[#0078D7] hover:text-white cursor-pointer"
-                  >
-                    <Share2 className="w-3.5 h-3.5" /> Share link
-                  </button>
+          {/* More Menu (...) */}
+          <div className="relative shrink-0">
+            <button
+              onClick={() => {
+                setTabMenuOpen(false);
+                setMenuOpen((o) => !o);
+              }}
+              className={`min-w-[30px] h-7 sm:p-1.5 flex items-center justify-center hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer ${
+                menuOpen ? 'bg-black/10 dark:bg-white/15' : ''
+              }`}
+              title="Settings and more"
+            >
+              <MoreHorizontal className="w-3.5 h-3.5" />
+            </button>
+
+            {menuOpen && (
+              <div
+                onMouseDown={(e) => e.stopPropagation()}
+                className="absolute right-0 top-full mt-1 w-64 max-w-[calc(100vw-24px)] max-h-[72vh] overflow-y-auto bg-white dark:bg-neutral-900 border border-neutral-300 dark:border-neutral-700 shadow-2xl z-50 py-1.5 text-xs"
+              >
+                <div className="px-3 py-1.5 flex items-center justify-between border-b border-neutral-200 dark:border-neutral-800">
+                  <span className="font-medium">Zoom</span>
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={() => adjustZoom(-15)}
+                      className="p-1 hover:bg-neutral-200 dark:hover:bg-neutral-800 cursor-pointer"
+                      title="Zoom out"
+                    >
+                      <ZoomOut className="w-3.5 h-3.5" />
+                    </button>
+                    <span className="w-10 text-center tabular-nums">{activeTab.zoom}%</span>
+                    <button
+                      onClick={() => adjustZoom(15)}
+                      className="p-1 hover:bg-neutral-200 dark:hover:bg-neutral-800 cursor-pointer"
+                      title="Zoom in"
+                    >
+                      <ZoomIn className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Focus Mode & Desktop Site */}
+                <button
+                  onClick={() => {
+                    setMenuOpen(false);
+                    toggleFocusMode(win.instanceId);
+                  }}
+                  className="w-full flex items-center justify-between px-3 py-2 hover:bg-[#0078D7] hover:text-white cursor-pointer"
+                >
+                  <span className="flex items-center gap-2.5">
+                    {isFocusedMode ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
+                    {isFocusedMode ? 'Exit Focus mode' : 'Focus mode (Full screen)'}
+                  </span>
+                </button>
+
+                <button
+                  onClick={() => {
+                    toggleDesktopMode();
+                    setMenuOpen(false);
+                  }}
+                  className="w-full flex items-center justify-between px-3 py-2 hover:bg-[#0078D7] hover:text-white cursor-pointer"
+                >
+                  <span className="flex items-center gap-2.5">
+                    {activeTab.desktopMode ? <Laptop className="w-3.5 h-3.5" /> : <Smartphone className="w-3.5 h-3.5" />}
+                    Desktop site
+                  </span>
+                  <span className="text-[10.5px] font-semibold opacity-80">
+                    {activeTab.desktopMode ? 'ON' : 'OFF'}
+                  </span>
+                </button>
+
+                {activeTab.url.startsWith('http') && (
                   <button
                     onClick={() => {
+                      toggleBookmark();
                       setMenuOpen(false);
-                      setInstallAppTitle(activeTab.title);
-                      setInstallAppModal(true);
                     }}
                     className="w-full flex items-center gap-2.5 px-3 py-2 hover:bg-[#0078D7] hover:text-white cursor-pointer"
                   >
-                    <Plus className="w-3.5 h-3.5" /> Install site as Desktop app
+                    <Star className={`w-3.5 h-3.5 ${isBookmarked ? 'fill-amber-400 text-amber-400' : ''}`} />
+                    {isBookmarked ? 'Remove bookmark' : 'Bookmark this page'}
                   </button>
-                </>
-              )}
+                )}
 
-              <div className="my-1 border-t border-neutral-200 dark:border-neutral-800" />
-              <div className="px-3 py-1.5 space-y-1">
-                <div className="text-[10.5px] text-neutral-500">Search engine</div>
-                <div className="grid grid-cols-3 gap-1">
-                  {(['google', 'bing', 'duckduckgo'] as SearchEngine[]).map((eng) => (
+                {!standaloneUrl && (
+                  <button
+                    onClick={() => {
+                      setMenuOpen(false);
+                      navigateTab('edge://home');
+                    }}
+                    className="w-full flex items-center gap-2.5 px-3 py-2 hover:bg-[#0078D7] hover:text-white cursor-pointer"
+                  >
+                    <Home className="w-3.5 h-3.5" /> New tab page
+                  </button>
+                )}
+
+                {activeTab.url.startsWith('http') && isNative && (
+                  <button
+                    onClick={() => {
+                      setMenuOpen(false);
+                      if (findBarOpen) closeFindBar();
+                      else setFindBarOpen(true);
+                    }}
+                    className="w-full flex items-center gap-2.5 px-3 py-2 hover:bg-[#0078D7] hover:text-white cursor-pointer"
+                  >
+                    <Search className="w-3.5 h-3.5" /> Find in page
+                  </button>
+                )}
+
+                {!standaloneUrl && (
+                  <>
+                    <div className="my-1 border-t border-neutral-200 dark:border-neutral-800" />
                     <button
-                      key={eng}
-                      onClick={() => updateSettings({ searchEngine: eng })}
-                      className={`py-1 text-[10.5px] capitalize border cursor-pointer ${
-                        searchEngine === eng
-                          ? 'bg-[#0078D7] text-white border-[#0078D7]'
-                          : 'border-neutral-300 dark:border-neutral-700'
-                      }`}
+                      onClick={() => {
+                        setMenuOpen(false);
+                        setDrawer((d) => (d === 'bookmarks' ? null : 'bookmarks'));
+                      }}
+                      className="w-full flex items-center gap-2.5 px-3 py-2 hover:bg-[#0078D7] hover:text-white cursor-pointer"
                     >
-                      {eng === 'duckduckgo' ? 'DDG' : eng}
+                      <Bookmark className="w-3.5 h-3.5" /> Bookmarks
                     </button>
-                  ))}
-                </div>
-              </div>
+                    <button
+                      onClick={() => {
+                        setMenuOpen(false);
+                        setDrawer((d) => (d === 'history' ? null : 'history'));
+                      }}
+                      className="w-full flex items-center gap-2.5 px-3 py-2 hover:bg-[#0078D7] hover:text-white cursor-pointer"
+                    >
+                      <History className="w-3.5 h-3.5" /> History
+                    </button>
+                    <button
+                      onClick={() => {
+                        setMenuOpen(false);
+                        setDrawer((d) => (d === 'downloads' ? null : 'downloads'));
+                      }}
+                      className="w-full flex items-center gap-2.5 px-3 py-2 hover:bg-[#0078D7] hover:text-white cursor-pointer"
+                    >
+                      <Download className="w-3.5 h-3.5" /> Downloads
+                    </button>
+                    <div className="my-1 border-t border-neutral-200 dark:border-neutral-800" />
+                    <button
+                      onClick={() => addTab(false)}
+                      className="w-full flex items-center gap-2.5 px-3 py-2 hover:bg-[#0078D7] hover:text-white cursor-pointer"
+                    >
+                      <Plus className="w-3.5 h-3.5" /> New tab
+                    </button>
+                    <button
+                      onClick={() => addTab(true)}
+                      className="w-full flex items-center gap-2.5 px-3 py-2 hover:bg-[#0078D7] hover:text-white cursor-pointer"
+                    >
+                      <EyeOff className="w-3.5 h-3.5" /> New InPrivate tab
+                    </button>
+                    {activeTab.url.startsWith('http') && (
+                      <button
+                        onClick={() => {
+                          setMenuOpen(false);
+                          openUrlInNewTab(activeTab.url, activeTab.incognito);
+                        }}
+                        className="w-full flex items-center gap-2.5 px-3 py-2 hover:bg-[#0078D7] hover:text-white cursor-pointer"
+                      >
+                        <ExternalLink className="w-3.5 h-3.5" /> Open link in new tab
+                      </button>
+                    )}
+                  </>
+                )}
 
-              <div className="my-1 border-t border-neutral-200 dark:border-neutral-800" />
-              <button
-                onClick={() => void handleClearCookiesAndCache()}
-                className="w-full flex items-center gap-2.5 px-3 py-2 text-rose-600 dark:text-rose-400 hover:bg-rose-600 hover:text-white cursor-pointer"
-              >
-                <Trash2 className="w-3.5 h-3.5" /> Clear cookies &amp; cache
-              </button>
-            </div>
-          )}
+                {activeTab.url.startsWith('http') && (
+                  <>
+                    <button
+                      onClick={() => void handleCopyOrShare('copy')}
+                      className="w-full flex items-center gap-2.5 px-3 py-2 hover:bg-[#0078D7] hover:text-white cursor-pointer"
+                    >
+                      <Copy className="w-3.5 h-3.5" /> Copy link
+                    </button>
+                    <button
+                      onClick={() => void handleCopyOrShare('share')}
+                      className="w-full flex items-center gap-2.5 px-3 py-2 hover:bg-[#0078D7] hover:text-white cursor-pointer"
+                    >
+                      <Share2 className="w-3.5 h-3.5" /> Share link
+                    </button>
+                    <button
+                      onClick={() => {
+                        setMenuOpen(false);
+                        setInstallAppTitle(activeTab.title);
+                        setInstallAppModal(true);
+                      }}
+                      className="w-full flex items-center gap-2.5 px-3 py-2 hover:bg-[#0078D7] hover:text-white cursor-pointer"
+                    >
+                      <Plus className="w-3.5 h-3.5" /> Install site as Desktop app
+                    </button>
+                  </>
+                )}
+
+                <div className="my-1 border-t border-neutral-200 dark:border-neutral-800" />
+                <div className="px-3 py-1.5 space-y-1">
+                  <div className="text-[10.5px] text-neutral-500">Search engine</div>
+                  <div className="grid grid-cols-3 gap-1">
+                    {(['google', 'bing', 'duckduckgo'] as SearchEngine[]).map((eng) => (
+                      <button
+                        key={eng}
+                        onClick={() => updateSettings({ searchEngine: eng })}
+                        className={`py-1 text-[10.5px] capitalize border cursor-pointer ${
+                          searchEngine === eng
+                            ? 'bg-[#0078D7] text-white border-[#0078D7]'
+                            : 'border-neutral-300 dark:border-neutral-700'
+                        }`}
+                      >
+                        {eng === 'duckduckgo' ? 'DDG' : eng}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="my-1 border-t border-neutral-200 dark:border-neutral-800" />
+                <button
+                  onClick={() => {
+                    setMenuOpen(false);
+                    openApp('settings', { settingsTab: 'display' });
+                  }}
+                  className="w-full flex items-center gap-2.5 px-3 py-2 hover:bg-[#0078D7] hover:text-white cursor-pointer"
+                >
+                  <Sliders className="w-3.5 h-3.5" /> Display &amp; UI size settings
+                </button>
+                <button
+                  onClick={() => void handleClearCookiesAndCache()}
+                  className="w-full flex items-center gap-2.5 px-3 py-2 text-rose-600 dark:text-rose-400 hover:bg-rose-600 hover:text-white cursor-pointer"
+                >
+                  <Trash2 className="w-3.5 h-3.5" /> Clear cookies &amp; cache
+                </button>
+              </div>
+            )}
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Loading Progress Bar */}
       {activeTab.url.startsWith('http') && activeTab.isLoading && (
@@ -1560,8 +1883,8 @@ export const EdgeBrowser: React.FC<{
         </div>
       )}
 
-      {/* Bookmarks Bar */}
-      {!standaloneUrl && bookmarks.length > 0 && (
+      {/* Bookmarks Bar (hidden on narrow Phone windows or auto-hidden chrome) */}
+      {!standaloneUrl && !isNarrow && !isChromeHidden && bookmarks.length > 0 && (
         <div className="flex items-center gap-1 px-2 py-0.5 bg-neutral-100 dark:bg-[#252525] border-b border-neutral-200 dark:border-neutral-800 overflow-x-auto no-scrollbar shrink-0">
           {bookmarks.map((bm) => (
             <button

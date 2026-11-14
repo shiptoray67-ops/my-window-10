@@ -17,6 +17,7 @@ import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Path;
+import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Environment;
@@ -26,6 +27,7 @@ import android.os.Message;
 import android.os.SystemClock;
 import android.provider.Settings;
 import android.util.Base64;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.InputDevice;
 import android.view.MotionEvent;
@@ -35,6 +37,7 @@ import android.view.ViewGroup;
 import android.webkit.CookieManager;
 import android.webkit.DownloadListener;
 import android.webkit.GeolocationPermissions;
+import android.webkit.JavascriptInterface;
 import android.webkit.URLUtil;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
@@ -96,7 +99,12 @@ public class EmbeddedWebViewPlugin extends Plugin {
     double cssHeight = 0;
     double cssDpr = 0;
     long dragDownTime = 0;
+    float lastDragLocalX = 0f;
+    float lastDragLocalY = 0f;
     Runnable pendingLongPressUp = null;
+    int scrollAccum = 0;
+    long lastScrollEmitMs = 0;
+    long lastHoverProbeMs = 0;
 
     WebViewEntry(String id, WebView webView, boolean incognito, boolean desktopMode) {
       this.id = id;
@@ -106,15 +114,18 @@ public class EmbeddedWebViewPlugin extends Plugin {
     }
   }
 
+  private static final String TAG = "EmbeddedWebView";
   private final Map<String, WebViewEntry> webViews = new HashMap<>();
   private final List<String> zOrderIds = new ArrayList<>();
   private FrameLayout overlayContainer;
   private View touchInterceptorView;
   private boolean mouseModeTouchIntercept = false;
   private boolean forwardingTouchStream = false;
+  private String activeDragEntryId = null;
 
-  // Always-on-top native cursor
+  // Always-on-top native cursor & click feedback ripple
   private ImageView cursorView;
+  private View cursorRippleView;
   private boolean cursorVisible = false;
   private String cursorType = "arrow";
   private double cursorCssX = 0;
@@ -230,6 +241,65 @@ public class EmbeddedWebViewPlugin extends Plugin {
     return false;
   }
 
+  public void onHostFocusLostOrPaused() {
+    if (getBridge() == null) return;
+    getBridge().executeOnMainThread(() -> {
+      try {
+        cancelAllActiveDrags();
+        notifyListeners("nativeResetGestures", new JSObject());
+      } catch (Throwable t) {
+        Log.e(TAG, "onHostFocusLostOrPaused error", t);
+      }
+    });
+  }
+
+  public void onKeyboardHeightChanged(int imeBottomPx) {
+    if (getBridge() == null) return;
+    getBridge().executeOnMainThread(() -> {
+      try {
+        JSObject data = new JSObject();
+        data.put("visible", imeBottomPx > 80);
+        data.put("heightPx", imeBottomPx);
+        notifyListeners("keyboardChanged", data);
+
+        if (imeBottomPx > 80) {
+          for (int i = zOrderIds.size() - 1; i >= 0; i--) {
+            WebViewEntry entry = webViews.get(zOrderIds.get(i));
+            if (entry != null && entry.visible && entry.webView.getVisibility() == View.VISIBLE) {
+              entry.webView.evaluateJavascript(
+                "(function(){try{var a=document.activeElement;if(a&&a!==document.body&&a!==document.documentElement){setTimeout(function(){try{a.scrollIntoView({block:'center',behavior:'smooth'});}catch(e){}},90);}}catch(e){}})();",
+                null
+              );
+              break;
+            }
+          }
+        }
+      } catch (Throwable t) {
+        Log.e(TAG, "onKeyboardHeightChanged error", t);
+      }
+    });
+  }
+
+  private void cancelAllActiveDrags() {
+    forwardingTouchStream = false;
+    activeDragEntryId = null;
+    long now = SystemClock.uptimeMillis();
+    for (WebViewEntry entry : webViews.values()) {
+      try {
+        if (entry.pendingLongPressUp != null) {
+          entry.webView.removeCallbacks(entry.pendingLongPressUp);
+          entry.pendingLongPressUp = null;
+        }
+        if (entry.dragDownTime > 0) {
+          dispatchTouchPoint(entry.webView, entry.dragDownTime, now, MotionEvent.ACTION_CANCEL, entry.lastDragLocalX, entry.lastDragLocalY);
+          entry.dragDownTime = 0;
+        }
+      } catch (Throwable t) {
+        Log.e(TAG, "cancelAllActiveDrags error", t);
+      }
+    }
+  }
+
   // =========================================================================
   // OVERLAY CONTAINER & TOUCH INTERCEPTOR
   // =========================================================================
@@ -262,27 +332,33 @@ public class EmbeddedWebViewPlugin extends Plugin {
       touchInterceptorView.setVisibility(mouseModeTouchIntercept ? View.VISIBLE : View.GONE);
 
       touchInterceptorView.setOnTouchListener((v, ev) -> {
-        if (!mouseModeTouchIntercept) {
-          forwardingTouchStream = false;
-          return false;
-        }
-        int action = ev.getActionMasked();
-        if (action == MotionEvent.ACTION_DOWN) {
-          forwardingTouchStream = isPointInsideAnyVisibleWebView(ev.getX(), ev.getY());
+        try {
+          if (!mouseModeTouchIntercept || ev == null) {
+            forwardingTouchStream = false;
+            return false;
+          }
+          int action = ev.getActionMasked();
+          if (action == MotionEvent.ACTION_DOWN) {
+            forwardingTouchStream = isPointInsideAnyVisibleWebView(ev.getX(), ev.getY());
+            if (!forwardingTouchStream) {
+              return false;
+            }
+          }
           if (!forwardingTouchStream) {
             return false;
           }
-        }
-        if (!forwardingTouchStream) {
-          return false;
-        }
 
-        forwardTouchEventToCapacitor(ev);
+          forwardTouchEventToCapacitor(ev);
 
-        if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+          if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+            forwardingTouchStream = false;
+          }
+          return true;
+        } catch (Throwable t) {
+          Log.e(TAG, "touchInterceptorView error", t);
           forwardingTouchStream = false;
+          return true;
         }
-        return true;
       });
 
       overlayContainer.addView(touchInterceptorView);
@@ -306,18 +382,22 @@ public class EmbeddedWebViewPlugin extends Plugin {
   }
 
   private void forwardTouchEventToCapacitor(MotionEvent ev) {
-    WebView capWebView = getBridge().getWebView();
-    if (capWebView == null || touchInterceptorView == null) return;
-    int[] intLoc = new int[2];
-    int[] capLoc = new int[2];
-    touchInterceptorView.getLocationInWindow(intLoc);
-    capWebView.getLocationInWindow(capLoc);
-    float dx = intLoc[0] - capLoc[0];
-    float dy = intLoc[1] - capLoc[1];
-    MotionEvent copy = MotionEvent.obtain(ev);
-    copy.offsetLocation(dx, dy);
-    capWebView.dispatchTouchEvent(copy);
-    copy.recycle();
+    try {
+      WebView capWebView = getBridge().getWebView();
+      if (capWebView == null || touchInterceptorView == null) return;
+      int[] intLoc = new int[2];
+      int[] capLoc = new int[2];
+      touchInterceptorView.getLocationInWindow(intLoc);
+      capWebView.getLocationInWindow(capLoc);
+      float dx = intLoc[0] - capLoc[0];
+      float dy = intLoc[1] - capLoc[1];
+      MotionEvent copy = MotionEvent.obtain(ev);
+      copy.offsetLocation(dx, dy);
+      capWebView.dispatchTouchEvent(copy);
+      copy.recycle();
+    } catch (Throwable t) {
+      Log.e(TAG, "forwardTouchEventToCapacitor error", t);
+    }
   }
 
   private void applyLayoutParams(WebViewEntry entry) {
@@ -369,6 +449,32 @@ public class EmbeddedWebViewPlugin extends Plugin {
     if (!(decor instanceof ViewGroup)) return;
     ViewGroup decorGroup = (ViewGroup) decor;
 
+    if (cursorRippleView == null) {
+      float density = getContext().getResources().getDisplayMetrics().density;
+      if (density <= 0f) density = 1f;
+      int sizePx = Math.round(24f * density);
+      cursorRippleView = new View(activity);
+      cursorRippleView.setClickable(false);
+      cursorRippleView.setFocusable(false);
+      cursorRippleView.setFocusableInTouchMode(false);
+      cursorRippleView.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+      GradientDrawable ring = new GradientDrawable();
+      ring.setShape(GradientDrawable.OVAL);
+      ring.setStroke(Math.max(2, Math.round(2f * density)), Color.rgb(0, 120, 215));
+      ring.setColor(Color.argb(40, 0, 120, 215));
+      cursorRippleView.setBackground(ring);
+      FrameLayout.LayoutParams rlp = new FrameLayout.LayoutParams(sizePx, sizePx, Gravity.TOP | Gravity.START);
+      cursorRippleView.setLayoutParams(rlp);
+      cursorRippleView.setVisibility(View.GONE);
+    }
+
+    if (cursorRippleView.getParent() != decorGroup) {
+      if (cursorRippleView.getParent() instanceof ViewGroup) {
+        ((ViewGroup) cursorRippleView.getParent()).removeView(cursorRippleView);
+      }
+      decorGroup.addView(cursorRippleView);
+    }
+
     if (cursorView == null) {
       cursorView = new ImageView(activity);
       cursorView.setClickable(false);
@@ -392,18 +498,46 @@ public class EmbeddedWebViewPlugin extends Plugin {
       }
       decorGroup.addView(cursorView);
     }
+    cursorRippleView.bringToFront();
     cursorView.bringToFront();
   }
 
   private void bringCursorToFront() {
     if (cursorView != null && cursorVisible) {
       ensureCursorView();
+      if (cursorRippleView != null) {
+        cursorRippleView.bringToFront();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+          cursorRippleView.setElevation(999f);
+          cursorRippleView.setTranslationZ(999f);
+        }
+      }
       cursorView.bringToFront();
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
         cursorView.setElevation(1000f);
         cursorView.setTranslationZ(1000f);
       }
     }
+  }
+
+  private float effectiveDpr() {
+    float dpr = cursorDpr > 0 ? (float) cursorDpr : getContext().getResources().getDisplayMetrics().density;
+    return dpr > 0f ? dpr : 1f;
+  }
+
+  private void clampCursorToViewport() {
+    WebView capWebView = getBridge().getWebView();
+    if (capWebView == null) return;
+    float dpr = effectiveDpr();
+    int w = capWebView.getWidth();
+    int h = capWebView.getHeight();
+    if (w <= 0 || h <= 0) return;
+    double maxCssW = Math.max(10.0, (w / dpr) - 2.0);
+    double maxCssH = Math.max(10.0, (h / dpr) - 2.0);
+    if (Double.isNaN(cursorCssX) || Double.isInfinite(cursorCssX)) cursorCssX = maxCssW / 2.0;
+    if (Double.isNaN(cursorCssY) || Double.isInfinite(cursorCssY)) cursorCssY = maxCssH / 2.0;
+    cursorCssX = Math.max(0.0, Math.min(maxCssW, cursorCssX));
+    cursorCssY = Math.max(0.0, Math.min(maxCssH, cursorCssY));
   }
 
   private void updateCursorTranslation() {
@@ -413,8 +547,8 @@ public class EmbeddedWebViewPlugin extends Plugin {
     if (activity == null || capWebView == null) return;
     View decor = activity.getWindow().getDecorView();
 
-    float dpr = cursorDpr > 0 ? (float) cursorDpr : getContext().getResources().getDisplayMetrics().density;
-    if (dpr <= 0f) dpr = 1f;
+    clampCursorToViewport();
+    float dpr = effectiveDpr();
 
     int[] capLoc = new int[2];
     int[] decorLoc = new int[2];
@@ -428,6 +562,53 @@ public class EmbeddedWebViewPlugin extends Plugin {
 
     cursorView.setTranslationX(px);
     cursorView.setTranslationY(py);
+    cursorView.invalidate();
+  }
+
+  private void triggerNativeClickRipple(String kind, double cssX, double cssY) {
+    if (!cursorVisible) return;
+    ensureCursorView();
+    Activity activity = getActivity();
+    WebView capWebView = getBridge().getWebView();
+    if (activity == null || capWebView == null || cursorRippleView == null) return;
+
+    View decor = activity.getWindow().getDecorView();
+    float dpr = effectiveDpr();
+    int[] capLoc = new int[2];
+    int[] decorLoc = new int[2];
+    capWebView.getLocationInWindow(capLoc);
+    decor.getLocationInWindow(decorLoc);
+
+    float half = (cursorRippleView.getLayoutParams() != null ? cursorRippleView.getLayoutParams().width : 24) / 2f;
+    float rx = (float) cssX * dpr + (capLoc[0] - decorLoc[0]) - half;
+    float ry = (float) cssY * dpr + (capLoc[1] - decorLoc[1]) - half;
+
+    if (cursorRippleView.getBackground() instanceof GradientDrawable) {
+      GradientDrawable gd = (GradientDrawable) cursorRippleView.getBackground();
+      int color = "right".equals(kind) ? Color.rgb(245, 158, 11) : Color.rgb(0, 120, 215);
+      gd.setStroke(Math.max(2, Math.round(2f * dpr)), color);
+      gd.setColor(Color.argb(45, Color.red(color), Color.green(color), Color.blue(color)));
+    }
+
+    cursorRippleView.animate().cancel();
+    cursorRippleView.setTranslationX(rx);
+    cursorRippleView.setTranslationY(ry);
+    cursorRippleView.setScaleX(0.45f);
+    cursorRippleView.setScaleY(0.45f);
+    cursorRippleView.setAlpha(0.95f);
+    cursorRippleView.setVisibility(View.VISIBLE);
+    bringCursorToFront();
+    cursorRippleView.animate()
+      .scaleX(1.35f)
+      .scaleY(1.35f)
+      .alpha(0f)
+      .setDuration(210)
+      .withEndAction(() -> {
+        if (cursorRippleView != null) {
+          cursorRippleView.setVisibility(View.GONE);
+        }
+      })
+      .start();
   }
 
   private void applyCursorBitmap(String type) {
@@ -639,6 +820,17 @@ public class EmbeddedWebViewPlugin extends Plugin {
   private void attachWebViewClients(WebViewEntry entry) {
     WebView wv = entry.webView;
 
+    wv.setOnScrollChangeListener((v, scrollX, scrollY, oldScrollX, oldScrollY) -> {
+      handleWebViewScrollDelta(entry, scrollY - oldScrollY, scrollY);
+    });
+
+    wv.addJavascriptInterface(new Object() {
+      @JavascriptInterface
+      public void onInnerScroll(int dy, int scrollTop) {
+        mainHandler.post(() -> handleWebViewScrollDelta(entry, dy, scrollTop));
+      }
+    }, "__win10WvBridge");
+
     wv.setWebViewClient(new WebViewClient() {
       @Override
       public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
@@ -689,6 +881,7 @@ public class EmbeddedWebViewPlugin extends Plugin {
         super.onPageStarted(view, url, favicon);
         entry.currentUrl = url != null ? url : entry.currentUrl;
         entry.progress = 10;
+        entry.scrollAccum = 0;
 
         JSObject startData = new JSObject();
         startData.put("id", entry.id);
@@ -723,9 +916,8 @@ public class EmbeddedWebViewPlugin extends Plugin {
           } catch (Exception ignored) {}
         }
 
-        if (entry.zoomPercent != 100) {
-          applyCssZoom(view, entry.zoomPercent);
-        }
+        applyCssZoom(view, entry.zoomPercent);
+        injectMobileHelpersAndScrollHook(view, entry.desktopMode);
 
         JSObject finishData = new JSObject();
         finishData.put("id", entry.id);
@@ -977,12 +1169,61 @@ public class EmbeddedWebViewPlugin extends Plugin {
     bringCursorToFront();
   }
 
+  private void handleWebViewScrollDelta(WebViewEntry entry, int dy, int scrollY) {
+    if (entry == null) return;
+    long now = SystemClock.uptimeMillis();
+    if (scrollY <= 12) {
+      entry.scrollAccum = 0;
+      if (now - entry.lastScrollEmitMs > 120) {
+        entry.lastScrollEmitMs = now;
+        JSObject d = new JSObject();
+        d.put("id", entry.id);
+        d.put("direction", "top");
+        d.put("scrollY", scrollY);
+        notifyListeners("scrollDirection", d);
+      }
+      return;
+    }
+    entry.scrollAccum += dy;
+    if (Math.abs(entry.scrollAccum) < 22) return;
+    if (now - entry.lastScrollEmitMs < 130) return;
+
+    String dir = entry.scrollAccum > 0 ? "down" : "up";
+    entry.scrollAccum = 0;
+    entry.lastScrollEmitMs = now;
+    JSObject d = new JSObject();
+    d.put("id", entry.id);
+    d.put("direction", dir);
+    d.put("scrollY", scrollY);
+    notifyListeners("scrollDirection", d);
+  }
+
+  private void injectMobileHelpersAndScrollHook(WebView wv, boolean desktopMode) {
+    String script = "(function(){"
+      + "try{"
+      + "if(!" + desktopMode + " && !document.querySelector('meta[name=viewport]')){"
+      + "var m=document.createElement('meta');m.name='viewport';m.content='width=device-width,initial-scale=1.0';"
+      + "if(document.head)document.head.appendChild(m);"
+      + "}"
+      + "if(!window.__win10Hooked){window.__win10Hooked=true;"
+      + "var map=new WeakMap();var lastTop=window.scrollY||0;"
+      + "document.addEventListener('scroll',function(ev){"
+      + "try{var t=ev.target;var top=(t===document||t===document.documentElement||t===document.body)?(window.scrollY||document.documentElement.scrollTop||0):(t.scrollTop||0);"
+      + "var prev=(t===document||t===document.documentElement||t===document.body)?lastTop:(map.get(t)||top);"
+      + "var dy=top-prev;"
+      + "if(t===document||t===document.documentElement||t===document.body)lastTop=top;else map.set(t,top);"
+      + "if(Math.abs(dy)>=6 && window.__win10WvBridge){window.__win10WvBridge.onInnerScroll(Math.round(dy),Math.round(top));}"
+      + "}catch(e){}"
+      + "},{capture:true,passive:true});"
+      + "}"
+      + "}catch(e){}"
+      + "})();";
+    wv.evaluateJavascript(script, null);
+  }
+
   private void applyCssZoom(WebView wv, int zoomPercent) {
-    wv.getSettings().setTextZoom(Math.max(50, Math.min(250, zoomPercent)));
-    String jsZoom = zoomPercent == 100
-      ? "if (document && document.documentElement) { document.documentElement.style.zoom = ''; }"
-      : "if (document && document.documentElement) { document.documentElement.style.zoom = '" + (zoomPercent / 100.0) + "'; }";
-    wv.evaluateJavascript(jsZoom, null);
+    int clamped = Math.max(75, Math.min(200, zoomPercent));
+    wv.getSettings().setTextZoom(clamped);
   }
 
   private void cleanupWebView(WebViewEntry entry) {
@@ -1330,12 +1571,16 @@ public class EmbeddedWebViewPlugin extends Plugin {
       if (type != null && !type.isEmpty()) {
         applyCursorBitmap(type);
       }
+      clampCursorToViewport();
       if (cursorView != null) {
         cursorView.setVisibility(View.VISIBLE);
         updateCursorTranslation();
         bringCursorToFront();
       }
-      call.resolve();
+      JSObject res = new JSObject();
+      res.put("x", cursorCssX);
+      res.put("y", cursorCssY);
+      call.resolve(res);
     });
   }
 
@@ -1343,8 +1588,12 @@ public class EmbeddedWebViewPlugin extends Plugin {
   public void hideCursor(PluginCall call) {
     getBridge().executeOnMainThread(() -> {
       cursorVisible = false;
+      cancelAllActiveDrags();
       if (cursorView != null) {
         cursorView.setVisibility(View.GONE);
+      }
+      if (cursorRippleView != null) {
+        cursorRippleView.setVisibility(View.GONE);
       }
       call.resolve();
     });
@@ -1359,6 +1608,7 @@ public class EmbeddedWebViewPlugin extends Plugin {
       cursorCssX = x;
       cursorCssY = y;
       if (dpr != null && dpr > 0) cursorDpr = dpr;
+      clampCursorToViewport();
       if (cursorView == null && cursorVisible) {
         ensureCursorView();
       }
@@ -1368,7 +1618,42 @@ public class EmbeddedWebViewPlugin extends Plugin {
         }
         updateCursorTranslation();
       }
-      call.resolve();
+      JSObject res = new JSObject();
+      res.put("x", cursorCssX);
+      res.put("y", cursorCssY);
+      call.resolve(res);
+    });
+  }
+
+  @PluginMethod
+  public void resetCursor(PluginCall call) {
+    Double dpr = call.getDouble("devicePixelRatio");
+    getBridge().executeOnMainThread(() -> {
+      cancelAllActiveDrags();
+      if (dpr != null && dpr > 0) cursorDpr = dpr;
+      WebView capWebView = getBridge().getWebView();
+      float d = effectiveDpr();
+      if (capWebView != null && capWebView.getWidth() > 0 && capWebView.getHeight() > 0) {
+        cursorCssX = (capWebView.getWidth() / d) * 0.5;
+        cursorCssY = (capWebView.getHeight() / d) * 0.5;
+      } else {
+        cursorCssX = 320.0;
+        cursorCssY = 200.0;
+      }
+      clampCursorToViewport();
+      applyCursorBitmap("arrow");
+      if (cursorVisible) {
+        ensureCursorView();
+        if (cursorView != null) {
+          cursorView.setVisibility(View.VISIBLE);
+          updateCursorTranslation();
+          bringCursorToFront();
+        }
+      }
+      JSObject res = new JSObject();
+      res.put("x", cursorCssX);
+      res.put("y", cursorCssY);
+      call.resolve(res);
     });
   }
 
@@ -1387,10 +1672,26 @@ public class EmbeddedWebViewPlugin extends Plugin {
   }
 
   @PluginMethod
+  public void showClickFeedback(PluginCall call) {
+    String kind = call.getString("kind", "left");
+    double x = call.getDouble("x", cursorCssX);
+    double y = call.getDouble("y", cursorCssY);
+    Double dpr = call.getDouble("devicePixelRatio");
+    getBridge().executeOnMainThread(() -> {
+      if (dpr != null && dpr > 0) cursorDpr = dpr;
+      triggerNativeClickRipple(kind, x, y);
+      call.resolve();
+    });
+  }
+
+  @PluginMethod
   public void setMouseModeTouchIntercept(PluginCall call) {
     boolean enabled = Boolean.TRUE.equals(call.getBoolean("enabled", false));
     getBridge().executeOnMainThread(() -> {
       mouseModeTouchIntercept = enabled;
+      if (!enabled) {
+        cancelAllActiveDrags();
+      }
       forwardingTouchStream = false;
       ensureOverlayContainer();
       if (touchInterceptorView != null) {
@@ -1460,6 +1761,7 @@ public class EmbeddedWebViewPlugin extends Plugin {
     Double dpr = call.getDouble("devicePixelRatio");
 
     getBridge().executeOnMainThread(() -> {
+      triggerNativeClickRipple("left", x, y);
       WebViewEntry entry = resolveTargetEntry(id, x, y);
       if (entry != null) {
         float[] pt = toLocalPixels(entry, x, y, dpr);
@@ -1480,6 +1782,7 @@ public class EmbeddedWebViewPlugin extends Plugin {
     Double dpr = call.getDouble("devicePixelRatio");
 
     getBridge().executeOnMainThread(() -> {
+      triggerNativeClickRipple("left", x, y);
       WebViewEntry entry = resolveTargetEntry(id, x, y);
       if (entry != null) {
         float[] pt = toLocalPixels(entry, x, y, dpr);
@@ -1505,6 +1808,7 @@ public class EmbeddedWebViewPlugin extends Plugin {
     Double dpr = call.getDouble("devicePixelRatio");
 
     getBridge().executeOnMainThread(() -> {
+      triggerNativeClickRipple("right", x, y);
       WebViewEntry entry = resolveTargetEntry(id, x, y);
       if (entry != null) {
         if (entry.pendingLongPressUp != null) {
@@ -1536,27 +1840,50 @@ public class EmbeddedWebViewPlugin extends Plugin {
     Double dpr = call.getDouble("devicePixelRatio");
 
     getBridge().executeOnMainThread(() -> {
-      WebViewEntry entry = resolveTargetEntry(id, x, y);
+      String lookupId = (id != null && !id.isEmpty()) ? id : activeDragEntryId;
+      WebViewEntry entry = resolveTargetEntry(lookupId, x, y);
+      if ("cancel".equals(phase) && entry == null && activeDragEntryId != null) {
+        entry = webViews.get(activeDragEntryId);
+      }
+      if (("end".equals(phase)) && entry == null && activeDragEntryId != null) {
+        entry = webViews.get(activeDragEntryId);
+      }
+
       if (entry != null) {
         if (entry.pendingLongPressUp != null) {
           entry.webView.removeCallbacks(entry.pendingLongPressUp);
           entry.pendingLongPressUp = null;
         }
         float[] pt = toLocalPixels(entry, x, y, dpr);
+        entry.lastDragLocalX = pt[0];
+        entry.lastDragLocalY = pt[1];
         long now = SystemClock.uptimeMillis();
         if ("start".equals(phase)) {
+          activeDragEntryId = entry.id;
           entry.webView.requestFocus();
           entry.dragDownTime = now;
           dispatchTouchPoint(entry.webView, entry.dragDownTime, now, MotionEvent.ACTION_DOWN, pt[0], pt[1]);
         } else if ("move".equals(phase)) {
-          if (entry.dragDownTime <= 0) entry.dragDownTime = now;
+          if (entry.dragDownTime <= 0) {
+            activeDragEntryId = entry.id;
+            entry.dragDownTime = now;
+          }
           dispatchTouchPoint(entry.webView, entry.dragDownTime, now, MotionEvent.ACTION_MOVE, pt[0], pt[1]);
+        } else if ("cancel".equals(phase)) {
+          if (entry.dragDownTime > 0) {
+            dispatchTouchPoint(entry.webView, entry.dragDownTime, now, MotionEvent.ACTION_CANCEL, pt[0], pt[1]);
+            entry.dragDownTime = 0;
+          }
+          if (entry.id.equals(activeDragEntryId)) activeDragEntryId = null;
         } else {
           if (entry.dragDownTime > 0) {
             dispatchTouchPoint(entry.webView, entry.dragDownTime, now, MotionEvent.ACTION_UP, pt[0], pt[1]);
             entry.dragDownTime = 0;
           }
+          if (entry.id.equals(activeDragEntryId)) activeDragEntryId = null;
         }
+      } else if ("cancel".equals(phase) || "end".equals(phase)) {
+        cancelAllActiveDrags();
       }
       call.resolve();
     });
@@ -1627,6 +1954,27 @@ public class EmbeddedWebViewPlugin extends Plugin {
         ev.setSource(InputDevice.SOURCE_MOUSE);
         entry.webView.dispatchGenericMotionEvent(ev);
         ev.recycle();
+
+        if (now - entry.lastHoverProbeMs >= 75) {
+          entry.lastHoverProbeMs = now;
+          double localCssX = Math.max(1.0, Math.min(entry.cssWidth - 1.0, x - entry.cssX));
+          double localCssY = Math.max(1.0, Math.min(entry.cssHeight - 1.0, y - entry.cssY));
+          String probeJs = "(function(){try{var el=document.elementFromPoint("
+            + localCssX + "," + localCssY + ");if(!el)return 'arrow';"
+            + "if(el.closest('input:not([type=hidden]):not([type=button]):not([type=submit]):not([type=checkbox]):not([type=radio]),textarea,[contenteditable=true]'))return 'text';"
+            + "if(el.closest('a[href],button,[role=button],select,summary,label'))return 'hand';"
+            + "var cs=getComputedStyle(el).cursor;if(cs==='text')return 'text';if(cs==='pointer')return 'hand';"
+            + "return 'arrow';}catch(e){return 'arrow';}})();";
+          entry.webView.evaluateJavascript(probeJs, result -> {
+            if (result == null || !cursorVisible) return;
+            String clean = result.replace("\"", "").trim();
+            if ("hand".equals(clean) || "text".equals(clean) || "arrow".equals(clean)) {
+              if (!clean.equals(cursorType)) {
+                applyCursorBitmap(clean);
+              }
+            }
+          });
+        }
       }
       call.resolve();
     });
@@ -1643,7 +1991,7 @@ public class EmbeddedWebViewPlugin extends Plugin {
       WebViewEntry entry = resolveTargetEntry(id, x, y);
       int nextZoom = 100;
       if (entry != null && scaleDelta > 0.2) {
-        nextZoom = Math.max(50, Math.min(250, (int) Math.round(entry.zoomPercent * scaleDelta)));
+        nextZoom = Math.max(75, Math.min(200, (int) Math.round(entry.zoomPercent * scaleDelta)));
         if (nextZoom != entry.zoomPercent) {
           entry.zoomPercent = nextZoom;
           applyCssZoom(entry.webView, entry.zoomPercent);

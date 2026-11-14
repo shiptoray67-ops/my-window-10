@@ -87,7 +87,7 @@ define(['./workbox-afac4cd2'], (function (workbox) { 'use strict';
     "revision": "cb4250a9e15d7b8e0bb295dacf32b2c1"
   }, {
     "url": "index.html",
-    "revision": "5dd05ba3d3bceee6ae1ccbc35dadcdec"
+    "revision": "e72e3be9cf9adbe2f005c6de5c6c2e4c"
   }, {
     "url": "icon.svg",
     "revision": "a419d39011eb46dfd5b325b37f215121"
@@ -107,7 +107,7 @@ define(['./workbox-afac4cd2'], (function (workbox) { 'use strict';
     "url": "assets/win10_alpine_lockscreen_1794595377816-Cjde0xmk.jpg",
     "revision": null
   }, {
-    "url": "assets/web-BJi9n44d.js",
+    "url": "assets/web-CZAwIXHO.js",
     "revision": null
   }, {
     "url": "assets/user_profile_avatar_1794595378912-Bomrg-9h.jpg",
@@ -116,10 +116,10 @@ define(['./workbox-afac4cd2'], (function (workbox) { 'use strict';
     "url": "assets/sample_coastal_photo_1794595378663-C5AdPQOR.jpg",
     "revision": null
   }, {
-    "url": "assets/index-uVv391ys.css",
+    "url": "assets/index-Djs0I3cc.js",
     "revision": null
   }, {
-    "url": "assets/index-BHtbDWtH.js",
+    "url": "assets/index-BXjJbwqe.css",
     "revision": null
   }, {
     "url": "apple-touch-icon.png",

@@ -21,6 +21,9 @@ export const WindowFrame: React.FC<WindowFrameProps> = ({ win, children }) => {
     restoreWindow,
     updateWindowBounds,
     snapWindow,
+    applyWindowPreset,
+    chromeHiddenWindowIds,
+    setWindowChromeHidden,
     getWorkAreaRect,
     settings,
     isMobile,
@@ -166,32 +169,15 @@ export const WindowFrame: React.FC<WindowFrameProps> = ({ win, children }) => {
   };
 
   const openTitleContextMenu = (clientX: number, clientY: number) => {
-    const menuW = 196;
-    const menuH = 310;
+    const menuW = 204;
+    const menuH = 380;
     const x = Math.max(work.x + 4, Math.min(work.x + work.width - menuW - 4, clientX));
     const y = Math.max(work.y + 4, Math.min(work.y + work.height - menuH - 4, clientY));
     setTitleMenu({ x, y });
   };
 
-  const applyPresetSize = (preset: 'small' | 'medium' | 'large') => {
-    const ratio =
-      preset === 'small'
-        ? { w: 0.4, h: 0.48 }
-        : preset === 'medium'
-        ? { w: 0.6, h: 0.65 }
-        : { w: 0.85, h: 0.88 };
-    const nextW = Math.min(maxW, Math.max(minW, Math.round(work.width * ratio.w)));
-    const nextH = Math.min(maxH, Math.max(minH, Math.round(work.height * ratio.h)));
-    const nextX = work.x + Math.round((work.width - nextW) / 2);
-    const nextY = work.y + Math.round((work.height - nextH) / 2);
-    updateWindowBounds(win.instanceId, {
-      isMaximized: false,
-      snapState: 'none',
-      x: nextX,
-      y: nextY,
-      width: nextW,
-      height: nextH,
-    });
+  const applyPresetMenu = (preset: 'phone' | 'phone-x2' | 'tablet' | 'full' | 'small' | 'medium' | 'large') => {
+    applyWindowPreset(win.instanceId, preset);
     setTitleMenu(null);
   };
 
@@ -242,12 +228,12 @@ export const WindowFrame: React.FC<WindowFrameProps> = ({ win, children }) => {
       }
 
       const nx = Math.max(
-        work.x - dragStateRef.current.origW + 120,
-        Math.min(work.x + work.width - 120, dragStateRef.current.origX + dx)
+        work.x,
+        Math.min(work.x + work.width - dragStateRef.current.origW, dragStateRef.current.origX + dx)
       );
       const ny = Math.max(
         work.y,
-        Math.min(work.y + work.height - 36, dragStateRef.current.origY + dy)
+        Math.min(work.y + work.height - dragStateRef.current.origH, dragStateRef.current.origY + dy)
       );
       updateWindowBounds(win.instanceId, { x: nx, y: ny });
       setSnapGhost(detectSnapZone(clientX, clientY));
@@ -420,8 +406,8 @@ export const WindowFrame: React.FC<WindowFrameProps> = ({ win, children }) => {
 
       w = Math.min(maxW, Math.max(minW, w));
       h = Math.min(maxH, Math.max(minH, h));
-      x = Math.max(work.x - w + 120, Math.min(work.x + work.width - 120, x));
-      y = Math.max(work.y, Math.min(work.y + work.height - 36, y));
+      x = Math.max(work.x, Math.min(work.x + work.width - w, x));
+      y = Math.max(work.y, Math.min(work.y + work.height - h, y));
 
       updateWindowBounds(win.instanceId, { x, y, width: w, height: h, snapState: 'none' });
     };
@@ -471,10 +457,23 @@ export const WindowFrame: React.FC<WindowFrameProps> = ({ win, children }) => {
 
   const ghostRect = snapGhost ? getSnapGhostRect(snapGhost) : null;
 
-  const clampedX = Math.max(work.x - win.width + 120, Math.min(work.x + work.width - 120, win.x));
-  const clampedY = Math.max(work.y, Math.min(work.y + work.height - 36, win.y));
   const clampedW = Math.min(maxW, Math.max(minW, win.width));
   const clampedH = Math.min(maxH, Math.max(minH, win.height));
+  const clampedX = Math.max(work.x, Math.min(work.x + work.width - clampedW, win.x));
+  const clampedY = Math.max(work.y, Math.min(work.y + work.height - clampedH, win.y));
+  const isChromeHidden = Boolean(chromeHiddenWindowIds[win.instanceId]);
+  const titleBarHeightCls =
+    settings.uiSize === 'compact'
+      ? 'h-[30px]'
+      : settings.uiSize === 'large'
+      ? 'h-[38px]'
+      : 'h-8';
+  const titleBtnWidthCls =
+    settings.uiSize === 'compact'
+      ? 'w-10'
+      : settings.uiSize === 'large'
+      ? 'w-12'
+      : 'w-11';
 
   return (
     <>
@@ -516,57 +515,73 @@ export const WindowFrame: React.FC<WindowFrameProps> = ({ win, children }) => {
             : 'border border-neutral-300/60 dark:border-neutral-800 shadow-[0_8px_24px_rgba(0,0,0,0.28)]'
         }`}
       >
-        <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
-          {/* Title Bar */}
-          <div
-            onMouseDown={handleTitleMouseDown}
-            onTouchStart={handleTitleTouchStart}
-            onContextMenu={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              focusWindow(win.instanceId);
-              openTitleContextMenu(e.clientX, e.clientY);
-            }}
-            onDoubleClick={() =>
-              win.isMaximized ? restoreWindow(win.instanceId) : maximizeWindow(win.instanceId)
-            }
-            className={`h-8 shrink-0 flex items-center justify-between pl-2.5 select-none touch-none ${
-              isActive
-                ? 'bg-neutral-100 dark:bg-[#202020] text-neutral-900 dark:text-white'
-                : 'bg-neutral-200/90 dark:bg-[#2b2b2b] text-neutral-500 dark:text-neutral-400'
-            }`}
-          >
-            <div className="flex items-center gap-2 min-w-0 pr-2 pointer-events-none">
-              <AppIcon appId={win.appId} size={15} webColor={def?.webColor} />
-              <span className="text-xs font-normal truncate">{win.title}</span>
+        <div className="flex-1 min-h-0 flex flex-col overflow-hidden relative">
+          {/* Top-edge reveal handle when auto-hide chrome is collapsed */}
+          {isChromeHidden && (
+            <div
+              data-interactive="true"
+              onMouseEnter={() => setWindowChromeHidden(win.instanceId, false)}
+              onClick={() => setWindowChromeHidden(win.instanceId, false)}
+              onTouchStart={() => setWindowChromeHidden(win.instanceId, false)}
+              className="h-3 shrink-0 bg-neutral-200/80 dark:bg-neutral-800/80 border-b border-neutral-300/60 dark:border-neutral-700/60 flex items-center justify-center cursor-pointer"
+              title="Tap or hover to show title bar & address bar"
+            >
+              <span className="w-8 h-1 rounded-full bg-neutral-400 dark:bg-neutral-500" />
             </div>
+          )}
 
-            <div className="relative z-40 flex items-center h-full shrink-0">
-              <button
-                onClick={() => minimizeWindow(win.instanceId)}
-                className="w-11 h-full flex items-center justify-center hover:bg-neutral-300/70 dark:hover:bg-white/10 transition-colors cursor-pointer"
-                title="Minimize"
-              >
-                <Minus className="w-3.5 h-3.5" />
-              </button>
-              <button
-                onClick={() =>
-                  win.isMaximized ? restoreWindow(win.instanceId) : maximizeWindow(win.instanceId)
-                }
-                className="w-11 h-full flex items-center justify-center hover:bg-neutral-300/70 dark:hover:bg-white/10 transition-colors cursor-pointer"
-                title={win.isMaximized ? 'Restore Down' : 'Maximize'}
-              >
-                {win.isMaximized ? <Copy className="w-3 h-3" /> : <Square className="w-3 h-3" />}
-              </button>
-              <button
-                onClick={() => closeWindow(win.instanceId)}
-                className="w-11 h-full flex items-center justify-center hover:bg-[#E81123] hover:text-white transition-colors cursor-pointer"
-                title="Close"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
+          {/* Title Bar */}
+          {!isChromeHidden && (
+            <div
+              onMouseDown={handleTitleMouseDown}
+              onTouchStart={handleTitleTouchStart}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                focusWindow(win.instanceId);
+                openTitleContextMenu(e.clientX, e.clientY);
+              }}
+              onDoubleClick={() =>
+                win.isMaximized ? restoreWindow(win.instanceId) : maximizeWindow(win.instanceId)
+              }
+              className={`${titleBarHeightCls} shrink-0 flex items-center justify-between pl-2.5 select-none touch-none ${
+                isActive
+                  ? 'bg-neutral-100 dark:bg-[#202020] text-neutral-900 dark:text-white'
+                  : 'bg-neutral-200/90 dark:bg-[#2b2b2b] text-neutral-500 dark:text-neutral-400'
+              }`}
+            >
+              <div className="flex items-center gap-2 min-w-0 pr-2 pointer-events-none">
+                <AppIcon appId={win.appId} size={15} webColor={def?.webColor} />
+                <span className="text-xs font-normal truncate">{win.title}</span>
+              </div>
+
+              <div className="relative z-40 flex items-center h-full shrink-0">
+                <button
+                  onClick={() => minimizeWindow(win.instanceId)}
+                  className={`${titleBtnWidthCls} h-full flex items-center justify-center hover:bg-neutral-300/70 dark:hover:bg-white/10 transition-colors cursor-pointer`}
+                  title="Minimize"
+                >
+                  <Minus className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  onClick={() =>
+                    win.isMaximized ? restoreWindow(win.instanceId) : maximizeWindow(win.instanceId)
+                  }
+                  className={`${titleBtnWidthCls} h-full flex items-center justify-center hover:bg-neutral-300/70 dark:hover:bg-white/10 transition-colors cursor-pointer`}
+                  title={win.isMaximized ? 'Restore Down' : 'Maximize'}
+                >
+                  {win.isMaximized ? <Copy className="w-3 h-3" /> : <Square className="w-3 h-3" />}
+                </button>
+                <button
+                  onClick={() => closeWindow(win.instanceId)}
+                  className={`${titleBtnWidthCls} h-full flex items-center justify-center hover:bg-[#E81123] hover:text-white transition-colors cursor-pointer`}
+                  title="Close"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
             </div>
-          </div>
+          )}
 
           {/* App Viewport */}
           <div className="flex-1 min-h-0 overflow-hidden relative">{children}</div>
@@ -641,22 +656,50 @@ export const WindowFrame: React.FC<WindowFrameProps> = ({ win, children }) => {
           onMouseDown={(e) => e.stopPropagation()}
           onTouchStart={(e) => e.stopPropagation()}
           style={{ left: titleMenu.x, top: titleMenu.y, zIndex: 9600 }}
-          className="fixed w-48 bg-neutral-100/95 dark:bg-neutral-900/95 text-neutral-900 dark:text-neutral-100 border border-neutral-300 dark:border-neutral-700 shadow-2xl py-1 text-xs backdrop-blur-xl"
+          className="fixed w-52 max-h-[calc(100vh-56px)] overflow-y-auto bg-neutral-100/95 dark:bg-neutral-900/95 text-neutral-900 dark:text-neutral-100 border border-neutral-300 dark:border-neutral-700 shadow-2xl py-1 text-xs backdrop-blur-xl"
         >
+          <div className="px-3.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-neutral-500">
+            Mobile Window Presets
+          </div>
           <button
-            onClick={() => applyPresetSize('small')}
+            onClick={() => applyPresetMenu('phone')}
+            className="w-full px-3.5 py-1.5 text-left hover:bg-[#0078D7] hover:text-white cursor-pointer"
+          >
+            Phone (~360px)
+          </button>
+          <button
+            onClick={() => applyPresetMenu('phone-x2')}
+            className="w-full px-3.5 py-1.5 text-left hover:bg-[#0078D7] hover:text-white cursor-pointer"
+          >
+            Phone x2 side by side
+          </button>
+          <button
+            onClick={() => applyPresetMenu('tablet')}
+            className="w-full px-3.5 py-1.5 text-left hover:bg-[#0078D7] hover:text-white cursor-pointer"
+          >
+            Tablet (60%)
+          </button>
+          <button
+            onClick={() => applyPresetMenu('full')}
+            className="w-full px-3.5 py-1.5 text-left hover:bg-[#0078D7] hover:text-white cursor-pointer"
+          >
+            Full
+          </button>
+          <div className="my-1 border-t border-neutral-200 dark:border-neutral-700" />
+          <button
+            onClick={() => applyPresetMenu('small')}
             className="w-full px-3.5 py-1.5 text-left hover:bg-[#0078D7] hover:text-white cursor-pointer"
           >
             Small
           </button>
           <button
-            onClick={() => applyPresetSize('medium')}
+            onClick={() => applyPresetMenu('medium')}
             className="w-full px-3.5 py-1.5 text-left hover:bg-[#0078D7] hover:text-white cursor-pointer"
           >
             Medium
           </button>
           <button
-            onClick={() => applyPresetSize('large')}
+            onClick={() => applyPresetMenu('large')}
             className="w-full px-3.5 py-1.5 text-left hover:bg-[#0078D7] hover:text-white cursor-pointer"
           >
             Large

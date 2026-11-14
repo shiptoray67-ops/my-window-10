@@ -34,6 +34,7 @@ export type PowerPhase = 'boot' | 'lock' | 'login' | 'desktop' | 'sleeping' | 'r
 export type TaskbarPosition = 'bottom' | 'top' | 'left' | 'right';
 export type DisplayOrientation = 'landscape' | 'auto';
 export type ResolutionScale = 75 | 100 | 125 | 150;
+export type UISize = 'compact' | 'normal' | 'large';
 export type SearchEngine = 'google' | 'bing' | 'duckduckgo';
 
 export interface AppDefinition {
@@ -211,5 +212,7 @@ export interface SystemSettings {
   showTouchpadPanel: boolean;
   orientation: DisplayOrientation;
   resolutionScale: ResolutionScale;
+  uiSize: UISize;
+  browserTextZoom: number;
   searchEngine: SearchEngine;
 }
